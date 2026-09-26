@@ -1,0 +1,6 @@
+builds/
+browser/current.json
+node_modules/
+test-results/
+__pycache__/
+*.py[cod]

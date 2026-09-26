@@ -1,0 +1,32 @@
+name: Simulator checks
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check Python syntax
+        run: python3 -m compileall -q web/browser web/tools web/tests
+      - name: Install JavaScript dependencies
+        run: npm ci --prefix web
+      - name: Run simulator unit and compatibility tests
+        run: |
+          python3 web/tests/test-resolve-build-target.py
+          python3 web/tests/test-trigger-pr.py
+          npm run test:browser --prefix web
+          npm run test:compat --prefix web
