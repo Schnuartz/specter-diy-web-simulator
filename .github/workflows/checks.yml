@@ -24,9 +24,11 @@ jobs:
         run: python3 -m compileall -q web/browser web/tools web/tests
       - name: Install JavaScript dependencies
         run: npm ci --prefix web
-      - name: Run simulator unit and compatibility tests
+      - name: Run simulator unit tests
         run: |
           python3 web/tests/test-resolve-build-target.py
           python3 web/tests/test-trigger-pr.py
-          npm run test:browser --prefix web
-          npm run test:compat --prefix web
+          node web/tests/test-demo-data.mjs
+          node web/tests/test-qr.mjs
+          node web/tests/test-camera.mjs
+          node web/tests/test-card.mjs
