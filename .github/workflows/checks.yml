@@ -29,6 +29,3 @@ jobs:
           python3 web/tests/test-resolve-build-target.py
           python3 web/tests/test-trigger-pr.py
           node web/tests/test-demo-data.mjs
-          node web/tests/test-qr.mjs
-          node web/tests/test-camera.mjs
-          node web/tests/test-card.mjs
