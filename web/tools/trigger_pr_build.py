@@ -33,7 +33,7 @@ def trigger(repository: str, number: int):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("number", type=int, help="open PR number")
-    parser.add_argument("--repo", default="Schnuartz/specter-diy")
+    parser.add_argument("--repo", default="cryptoadvance/specter-diy")
     args = parser.parse_args()
     trigger(args.repo, args.number)
 

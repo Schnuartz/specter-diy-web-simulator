@@ -117,7 +117,7 @@ current head, the target job reports the current prefix and stops the build.
 The CLI helper needs only the PR number and reads the SHA itself:
 
 ```sh
-python3 web/tools/trigger_pr_build.py 123 --repo Schnuartz/specter-diy
+python3 web/tools/trigger_pr_build.py 123 --repo cryptoadvance/specter-diy
 ```
 
 This starts the existing `Build` workflow; it does not create another Actions
@@ -131,11 +131,11 @@ may still fail to build; its build log will show the concrete incompatibility.
 GitHub's manual Run workflow button is unavailable until this workflow file is
 present on the repository's default branch.
 
-For this fork, enable **Settings → Pages → Build and deployment → GitHub
-Actions** once. Confirm Actions are enabled and allow the publisher workflow
+For `cryptoadvance/specter-diy`, enable **Settings → Pages → Build and deployment →
+GitHub Actions** once. Confirm Actions are enabled and allow the publisher workflow
 to write to the repository. After the first successful default-branch build,
-the stable URL is `https://schnuartz.github.io/specter-diy/`; PR previews
-are `https://schnuartz.github.io/specter-diy/pr/<number>/`. The same workflow
+the stable URL is `https://cryptoadvance.github.io/specter-diy/`; PR previews
+are `https://cryptoadvance.github.io/specter-diy/pr/<number>/`. The same workflow
 uses `GITHUB_REPOSITORY` and works in another fork after its owner enables
 Actions and Pages. PR previews are untrusted development code; the warning
 is permanent and no wallet secrets should ever be entered.
