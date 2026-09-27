@@ -148,6 +148,7 @@ class PublisherTests(unittest.TestCase):
         source = "Schnuartz/specter-diy"
         simulator = "cryptoadvance/specter-diy-web-simulator"
         simulator_sha = "d" * 40
+        simulator_link = f"https://github.com/{simulator}/commit/{simulator_sha}"
         calls = []
 
         def fake_api(method, path, body=None):
@@ -173,6 +174,13 @@ class PublisherTests(unittest.TestCase):
         self.assertIn(f"**Simulator tooling:** [{simulator}@{simulator_sha[:12]}]", body)
         self.assertLess(body.index("<details>"), body.index("**Specter source:**"))
         self.assertLess(body.index("**Simulator tooling:**"), body.index("</details>"))
+        self.assertIn(f"**Simulator tooling:** [{simulator}@{simulator_sha[:12]}]({simulator_link})\n"
+                      f"🔧 [Build workflow and logs]({state['run_url']})\n"
+                      "</details>", body)
+        self.assertIn(f'<a href="https://schnuartz.github.io/specter-diy/pr/44/" '
+                      'target="_blank" rel="noopener noreferrer">Open browser simulator</a>', body)
+        self.assertGreater(body.index("🔧 [Build workflow and logs]"), body.index("<details>"))
+        self.assertLess(body.index("🔧 [Build workflow and logs]"), body.index("</details>"))
 
     def test_superseded_run_writes_a_skipped_state_for_later_steps(self):
         preview = self.root / "pages/pr/17"
