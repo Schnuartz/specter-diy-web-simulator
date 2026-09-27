@@ -200,16 +200,18 @@ def comment(state: dict):
         source_link = f"https://github.com/{source}/commit/{sha}"
         simulator_link = (f"https://github.com/{simulator['repository']}/commit/"
                           f"{simulator['commit']}")
-        body = (f"{MARKER}\n🧪 **Specter PR Build** · `{sha[:12]}` ✅\n\n"
+        body = (f"{MARKER}\n🧪 **Specter PR Build** · `{sha[:7]}` ✅\n\n"
+                "<details>\n<summary>Build provenance</summary>\n\n"
                 f"**Specter source:** [{source}@{sha[:12]}]({source_link})\n"
                 f"**Simulator tooling:** [{simulator['repository']}@{simulator['commit'][:12]}]({simulator_link})\n\n"
+                "</details>\n\n"
                 f"🖥️ [Open browser simulator]({pages_url})\n\n"
                 f"⬇️ [Download firmware from the same commit]({firmware_url})\n\n"
                 f"🔧 [Build workflow and logs]({run_url})\n\n"
                 "⚠️ **Experimental development build.** Never use real funds or enter a real seed phrase. "
                 "Use dedicated test hardware for firmware builds.")
     else:
-        body = (f"{MARKER}\n🧪 **Specter PR Build** · `{sha[:12]}` ❌\n\n"
+        body = (f"{MARKER}\n🧪 **Specter PR Build** · `{sha[:7]}` ❌\n\n"
                 "The current PR commit has no published browser preview or matching firmware build. "
                 f"[Inspect build logs]({run_url}).\n\n"
                 "⚠️ Previous previews must not be treated as this commit.")
