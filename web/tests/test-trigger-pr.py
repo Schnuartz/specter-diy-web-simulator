@@ -16,9 +16,9 @@ class TriggerTests(unittest.TestCase):
             {"headRefOid": sha, "state": "OPEN", "baseRefName": "master"},
             {"defaultBranchRef": {"name": "master"}},
         ]), patch.object(trigger_pr_build.subprocess, "run") as run:
-            trigger_pr_build.trigger("Schnuartz/specter-diy", 19)
+            trigger_pr_build.trigger("cryptoadvance/specter-diy", 19)
         run.assert_called_once_with([
-            "gh", "workflow", "run", "build.yml", "--repo", "Schnuartz/specter-diy",
+            "gh", "workflow", "run", "build.yml", "--repo", "cryptoadvance/specter-diy",
             "--ref", "master", "-f", "pr_number=19", "-f", f"head_sha={sha}",
         ], check=True)
 
@@ -27,7 +27,7 @@ class TriggerTests(unittest.TestCase):
             "headRefOid": "a" * 40, "state": "CLOSED", "baseRefName": "master",
         }), patch.object(trigger_pr_build.subprocess, "run") as run:
             with self.assertRaisesRegex(ValueError, "open PR"):
-                trigger_pr_build.trigger("Schnuartz/specter-diy", 19)
+                trigger_pr_build.trigger("cryptoadvance/specter-diy", 19)
         run.assert_not_called()
 
     def test_rejects_pr_against_non_default_branch(self):
@@ -36,7 +36,7 @@ class TriggerTests(unittest.TestCase):
             {"defaultBranchRef": {"name": "master"}},
         ]), patch.object(trigger_pr_build.subprocess, "run") as run:
             with self.assertRaisesRegex(ValueError, "default branch"):
-                trigger_pr_build.trigger("Schnuartz/specter-diy", 19)
+                trigger_pr_build.trigger("cryptoadvance/specter-diy", 19)
         run.assert_not_called()
 
 

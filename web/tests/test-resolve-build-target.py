@@ -9,7 +9,7 @@ from resolve_build_target import resolve
 
 SHA = "a" * 40
 SIMULATOR = "b" * 40
-REPO = "Schnuartz/specter-diy"
+REPO = "cryptoadvance/specter-diy"
 
 
 class ResolveTests(unittest.TestCase):

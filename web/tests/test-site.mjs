@@ -136,7 +136,8 @@ await mobile.close();
 
 if (await page.locator('img[alt="ClavaStack"]').count() ||
     (await page.title()).includes('ClavaStack') ||
-    !await page.locator('a[href="https://github.com/Schnuartz/specter-diy"]').count()) {
+    !await page.locator('a[href="https://github.com/cryptoadvance/specter-diy"]').count() ||
+    !await page.locator('a[href="https://github.com/cryptoadvance/specter-virtual-host/releases/latest"]').count()) {
   throw new Error('Fork page branding or source link is incorrect');
 }
 console.log(JSON.stringify({ result: 'pass', canvasColors: colors.size,
