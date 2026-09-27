@@ -203,11 +203,11 @@ def comment(state: dict):
         body = (f"{MARKER}\n🧪 **Specter PR Build** · `{sha[:7]}` ✅\n\n"
                 "<details>\n<summary>Build provenance</summary>\n\n"
                 f"**Specter source:** [{source}@{sha[:12]}]({source_link})\n"
-                f"**Simulator tooling:** [{simulator['repository']}@{simulator['commit'][:12]}]({simulator_link})\n\n"
+                f"**Simulator tooling:** [{simulator['repository']}@{simulator['commit'][:12]}]({simulator_link})\n"
+                f"🔧 [Build workflow and logs]({run_url})\n"
                 "</details>\n\n"
-                f"🖥️ [Open browser simulator]({pages_url})\n\n"
+                f"🖥️ <a href=\"{pages_url}\" target=\"_blank\" rel=\"noopener noreferrer\">Open browser simulator</a>\n\n"
                 f"⬇️ [Download firmware from the same commit]({firmware_url})\n\n"
-                f"🔧 [Build workflow and logs]({run_url})\n\n"
                 "⚠️ **Experimental development build.** Never use real funds or enter a real seed phrase. "
                 "Use dedicated test hardware for firmware builds.")
     else:
