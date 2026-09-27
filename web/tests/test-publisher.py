@@ -142,6 +142,37 @@ class PublisherTests(unittest.TestCase):
         posted = [body for method, _, body in calls if method == "POST"]
         self.assertEqual(len(posted), 1)
         self.assertIn("no published browser preview", posted[0]["body"])
+        self.assertIn(f"`{SHA[:7]}` ❌", posted[0]["body"])
+
+    def test_success_comment_compacts_sha_and_collapses_provenance(self):
+        source = "Schnuartz/specter-diy"
+        simulator = "cryptoadvance/specter-diy-web-simulator"
+        simulator_sha = "d" * 40
+        calls = []
+
+        def fake_api(method, path, body=None):
+            calls.append((method, path, body))
+            return [] if method == "GET" else None
+
+        state = {"number": 44, "sha": SHA,
+                 "run_url": "https://github.com/Schnuartz/specter-diy/actions/runs/1",
+                 "run_id": 1, "published": True, "repo": source,
+                 "simulator": {"repository": simulator, "commit": simulator_sha}}
+        with patch.dict("os.environ", {"GITHUB_REPOSITORY": "Schnuartz/specter-diy"}), \
+                patch.object(publish_preview, "api", side_effect=fake_api), \
+                patch.object(publish_preview, "artifact_id", return_value=123):
+            publish_preview.comment(state)
+
+        posted = [body for method, _, body in calls if method == "POST"]
+        self.assertEqual(len(posted), 1)
+        body = posted[0]["body"]
+        self.assertIn(f"🧪 **Specter PR Build** · `{SHA[:7]}` ✅", body)
+        self.assertNotIn(f"Specter PR Build** · `{SHA[:12]}`", body)
+        self.assertIn("<details>\n<summary>Build provenance</summary>\n\n", body)
+        self.assertIn(f"**Specter source:** [{source}@{SHA[:12]}]", body)
+        self.assertIn(f"**Simulator tooling:** [{simulator}@{simulator_sha[:12]}]", body)
+        self.assertLess(body.index("<details>"), body.index("**Specter source:**"))
+        self.assertLess(body.index("**Simulator tooling:**"), body.index("</details>"))
 
     def test_superseded_run_writes_a_skipped_state_for_later_steps(self):
         preview = self.root / "pages/pr/17"
