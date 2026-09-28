@@ -2,7 +2,8 @@ name: Browser simulator
 
 # This workflow is deliberately reusable. It can stay beside the simulator
 # tooling today and later be moved to a dedicated simulator repository. The
-# caller remains responsible for selecting both immutable input commits.
+# caller selects the exact source commit and resolves the simulator's current
+# main branch to one immutable SHA for the duration of each build.
 on:
   workflow_call:
     inputs:
@@ -19,7 +20,7 @@ on:
         required: true
         type: string
       simulator_commit:
-        description: Full commit SHA of the simulator tooling
+        description: Full SHA resolved from the simulator repository's main branch for this run
         required: true
         type: string
       pr_number:
@@ -46,7 +47,7 @@ jobs:
           repository: ${{ inputs.source_repository }}
           ref: ${{ inputs.source_commit }}
           submodules: recursive
-      - name: Check out the pinned simulator tooling
+      - name: Check out the simulator tooling resolved from main
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.simulator_repository }}

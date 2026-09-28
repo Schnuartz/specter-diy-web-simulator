@@ -5,10 +5,10 @@ simulated smartcard/SD-card/USB runtime, browser shell, provenance checks,
 tests, and the reusable GitHub Actions workflows used by
 [`cryptoadvance/specter-diy`](https://github.com/cryptoadvance/specter-diy).
 
-The simulator is intentionally consumed by the firmware repository at an
-immutable commit. The caller supplies the exact Specter source commit and the
-simulator commit to the reusable build workflow, so a preview always has
-auditable source and tooling provenance.
+The firmware repository calls the reusable simulator workflow from `main`.
+Each build resolves that branch once to an exact commit SHA and uses that SHA
+throughout the run, so builds automatically use the latest main while keeping
+auditable and internally consistent source/tooling provenance.
 
 See [the simulator workflow and release notes](docs/browser-simulator.md) for
 the repository contract and migration details.

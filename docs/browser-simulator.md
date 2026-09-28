@@ -47,7 +47,10 @@ The build output is `web/builds/<owner>/<repo>/<source-sha>/` with
 `micropython.js`, `.wasm`, `.data`, and `build-info.json`. The manifest records
 two immutable inputs: `source.repository`/`source.commit` identify the
 Specter-DIY code being simulated, while `simulator.repository`/
-`simulator.commit` identify the simulator tooling that built it. It also
+`simulator.commit` identify the simulator tooling that built it. The firmware
+workflow resolves simulator `main` once at the start of each run and uses that
+SHA consistently, so new runs use the latest main while retaining exact
+per-build provenance. The manifest also
 records the Emscripten version, build time, and SHA256 of each artifact.
 `web/browser/current.json` remains only a pointer to the build. Both generated
 directories are ignored by Git. `SPECTER_SOURCE_REPOSITORY=owner/repo`,
@@ -70,18 +73,21 @@ CPython-only embit examples and tests cannot enter a current browser build.
 
 The existing `Build` workflow now runs native tests, builds Unix and STM32
 firmware, and calls the reusable `.github/workflows/browser-simulator.yml`
-workflow for the browser/QR/SD/Smartcard smoke tests. The caller passes the
-exact source and simulator SHAs; the reusable workflow checks out both and
-overlays only the simulator's `web/` tooling onto the source checkout. This
+workflow from this repository's `main` branch for the browser/QR/SD/Smartcard
+smoke tests. At the start of each run, the caller resolves simulator `main` to
+an exact SHA; the reusable workflow checks out that SHA alongside the exact
+Specter source and overlays only the simulator's `web/` tooling onto the
+source checkout. This
 keeps the execution context and read-only token in the calling Specter
 repository. The browser and firmware artifacts carry separate `source.json`
 records, and the browser `build-info.json` carries both provenance records.
 The build workflow has **read-only** repository permissions and no deployment
 secret.
 
-When the tooling is moved to its own repository, the caller only needs to
-change the `uses:` target to a full simulator-workflow SHA and pass that
-repository/SHA as the two simulator inputs. The workflow should remain a
+The workflow reference intentionally follows `main`, so new simulator
+workflows are used by subsequent firmware builds without editing the firmware
+repository. Each run resolves `main` once and pins that run's checkout and
+provenance to the resulting SHA. The workflow should remain a
 reusable workflow, not a cross-repository dispatch: the caller's token and
 Pages/PR context then stay in the Specter repository, which keeps fork builds
 usable without PATs or cross-repository write credentials.
