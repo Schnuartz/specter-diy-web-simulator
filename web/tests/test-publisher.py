@@ -169,16 +169,18 @@ class PublisherTests(unittest.TestCase):
         body = posted[0]["body"]
         self.assertIn(f"🧪 **Specter PR Build** · `{SHA[:7]}` ✅", body)
         self.assertNotIn(f"Specter PR Build** · `{SHA[:12]}`", body)
+        self.assertIn(f"🖥️ [Open browser simulator](https://schnuartz.github.io/specter-diy/pr/44/)\n\n"
+                      f"⬇️ [Download firmware from the same commit]({state['run_url']}/artifacts/123)\n\n"
+                      "<details>\n<summary>Build provenance</summary>\n\n", body)
         self.assertIn("<details>\n<summary>Build provenance</summary>\n\n", body)
         self.assertIn(f"**Specter source:** [{source}@{SHA[:12]}]", body)
         self.assertIn(f"**Simulator tooling:** [{simulator}@{simulator_sha[:12]}]", body)
+        self.assertLess(body.index("Download firmware from the same commit"), body.index("<details>"))
         self.assertLess(body.index("<details>"), body.index("**Specter source:**"))
         self.assertLess(body.index("**Simulator tooling:**"), body.index("</details>"))
         self.assertIn(f"**Simulator tooling:** [{simulator}@{simulator_sha[:12]}]({simulator_link})\n"
                       f"🔧 [Build workflow and logs]({state['run_url']})\n"
                       "</details>", body)
-        self.assertIn(f'<a href="https://schnuartz.github.io/specter-diy/pr/44/" '
-                      'target="_blank" rel="noopener noreferrer">Open browser simulator</a>', body)
         self.assertGreater(body.index("🔧 [Build workflow and logs]"), body.index("<details>"))
         self.assertLess(body.index("🔧 [Build workflow and logs]"), body.index("</details>"))
 
