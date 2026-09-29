@@ -19,7 +19,6 @@ permissions:
   actions: read
   contents: write
   issues: write
-  pull-requests: write
   pages: write
   id-token: write
 
@@ -39,6 +38,7 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
+          submodules: recursive
       - name: Check out the pinned simulator tooling
         uses: actions/checkout@v4
         with:
@@ -65,7 +65,20 @@ jobs:
           mkdir -p /tmp/specter-artifacts/browser /tmp/specter-artifacts/firmware
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name browser-simulator --dir /tmp/specter-artifacts/browser
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name firmware-binaries --dir /tmp/specter-artifacts/firmware
-          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name trusted-runtime --dir /tmp/specter-artifacts/runtime
+      - name: Build trusted runtime from the default branch
+        if: github.event.workflow_run.conclusion == 'success'
+        continue-on-error: true
+        env:
+          SPECTER_SOURCE_REPOSITORY: ${{ github.repository }}
+          SIMULATOR_REPOSITORY: ${{ inputs.simulator_repository }}
+          SIMULATOR_COMMIT: ${{ inputs.simulator_commit }}
+        run: |
+          rsync -a --delete simulator-tools/web/ web/
+          git clone https://github.com/emscripten-core/emsdk.git .browser-work/emsdk
+          .browser-work/emsdk/emsdk install 3.1.74
+          .browser-work/emsdk/emsdk activate 3.1.74
+          bash web/browser/build-browser.sh
+          cp "web/builds/$GITHUB_REPOSITORY/$(git rev-parse HEAD)/micropython.js" .browser-work/trusted-runtime.js
       - name: Prepare GitHub Pages branch
         run: |
           if git fetch origin gh-pages:refs/remotes/origin/gh-pages; then
@@ -81,13 +94,14 @@ jobs:
         id: prepare
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          APPROVED_SIMULATOR_COMMIT: ${{ inputs.simulator_commit }}
         run: |
           python3 simulator-tools/web/tools/publish_preview.py prepare \
             --event "$GITHUB_EVENT_PATH" \
             --target /tmp/specter-artifacts/target/target.json \
             --browser /tmp/specter-artifacts/browser \
             --firmware /tmp/specter-artifacts/firmware \
-            --runtime /tmp/specter-artifacts/runtime/trusted-micropython.js \
+            --runtime .browser-work/trusted-runtime.js \
             --pages pages --state /tmp/specter-preview-state.json
           if test -f pages/index.html || test -d pages/pr; then
             echo 'has_site=true' >> "$GITHUB_OUTPUT"
@@ -95,6 +109,12 @@ jobs:
             echo 'has_site=false' >> "$GITHUB_OUTPUT"
           fi
       - name: Publish static Pages branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 simulator-tools/web/tools/publish_preview.py recheck \
+            --event "$GITHUB_EVENT_PATH" --state /tmp/specter-preview-state.json
+      - name: Push static Pages branch
         run: |
           git -C pages add -A
           if ! git -C pages diff --cached --quiet; then

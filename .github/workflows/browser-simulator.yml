@@ -45,11 +45,13 @@ jobs:
           repository: ${{ github.repository }}
           ref: ${{ github.event.repository.default_branch }}
           submodules: recursive
+          persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: ${{ inputs.simulator_repository }}
           ref: ${{ inputs.simulator_commit }}
           path: simulator-tools
+          persist-credentials: false
       - name: Install trusted simulator tooling
         run: rsync -a --delete simulator-tools/web/ web/
       - name: Install pinned Emscripten
@@ -84,12 +86,14 @@ jobs:
           repository: ${{ inputs.source_repository }}
           ref: ${{ inputs.source_commit }}
           submodules: recursive
+          persist-credentials: false
       - name: Check out the pinned simulator tooling
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.simulator_repository }}
           ref: ${{ inputs.simulator_commit }}
           path: simulator-tools
+          persist-credentials: false
       - name: Overlay simulator tooling onto the source checkout
         run: |
           test -d simulator-tools/web
@@ -97,8 +101,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: web/package-lock.json
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -119,7 +121,7 @@ jobs:
         run: python3 web/browser/verify_build.py
       - name: Test preview provenance and publication rules
         run: |
-          python3 web/tests/test-publisher.py
+          python3 web/tests/test-direct-publisher.py
           python3 web/tests/test-trust-boundary.py
           python3 web/tests/test-trigger-pr.py
           python3 web/tests/test-resolve-build-target.py
@@ -138,7 +140,7 @@ jobs:
           (cd .browser-work/virtual-host && go run . --site http://127.0.0.1:8765 --no-open) > /tmp/specter-virtual-host.log 2>&1 &
           node web/tests/test-usb-transport.mjs
       - name: Record browser provenance
-        run: python3 web/tools/source_info.py browser
+        run: python3 simulator-tools/web/tools/source_info.py browser
       # Only firmware build data crosses from the untrusted build job to the
       # privileged publisher. The publisher supplies the browser shell itself.
       - name: Upload browser firmware build

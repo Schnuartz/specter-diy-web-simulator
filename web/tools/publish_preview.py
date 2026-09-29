@@ -17,6 +17,8 @@ from replace_glue import replace_glue  # type: ignore[import-not-found]
 MARKER = "<!-- specter-pr-build-comment -->"
 MANUAL_RUN = re.compile(r"Manual PR[ \t]+([1-9][0-9]{0,6})[ \t]+([a-f0-9]{7,40})[ \t]*")
 TRUSTED_WEB = Path(__file__).resolve().parents[1]
+EXPECTED_REPOSITORY = "cryptoadvance/specter-diy"
+EXPECTED_SIMULATOR = "cryptoadvance/specter-diy-web-simulator"
 
 
 def read_json_file(path: Path) -> dict:
@@ -77,10 +79,12 @@ def find_current_pr(run: dict) -> dict | None:
         event_head = event_heads.get(pr.get("number"))
         event_head_present = isinstance(event_head, str) and \
             bool(re.fullmatch(r"[a-f0-9]{40}", event_head))
+        if associated and not event_head_present:
+            continue
         if event_head_present and event_head != head.get("sha"):
             continue
         if pr.get("state") != "open" or not (event_head_present or
-                run.get("head_sha") in (head.get("sha"), pr.get("merge_commit_sha"))):
+                run.get("head_sha") == head.get("sha")):
             continue
         if not associated and (repo.get("full_name", "").lower() != full_name.lower() or
                 head.get("ref") != branch or run.get("head_sha") != head.get("sha")):
@@ -113,33 +117,11 @@ def find_current_manual_pr(run: dict, repository: str, default_branch: str) -> d
     return pr
 
 
-def find_current_target_pr(target: dict, repository: str, default_branch: str) -> dict | None:
-    """Bind the trusted Build target artifact to the current PR head."""
-    number = target.get("number")
-    sha = target.get("commit")
-    source_repository = target.get("repository")
-    branch = target.get("branch")
-    if target.get("event") != "workflow_run" or type(number) is not int or \
-            not 0 < number < 1_000_000 or not isinstance(sha, str) or \
-            not re.fullmatch(r"[a-f0-9]{40}", sha) or \
-            not isinstance(source_repository, str) or not isinstance(branch, str):
-        return None
-    pr = api("GET", f"/pulls/{number}")
-    head = pr.get("head") or {}
-    base = pr.get("base") or {}
-    if pr.get("number") != number or pr.get("state") != "open" or head.get("sha") != sha or \
-            (head.get("repo") or {}).get("full_name", "").lower() != source_repository.lower() or \
-            head.get("ref") != branch or \
-            (base.get("repo") or {}).get("full_name", "").lower() != repository.lower() or \
-            base.get("ref") != default_branch:
-        return None
-    return pr
-
-
-def read_source(directory: Path, kind: str, sha: str, repo: str) -> dict:
+def read_source(directory: Path, kind: str, sha: str, repo: str, pin: str) -> dict:
     source = read_json_file(directory / "source.json")
     if source.get("kind") != kind or source.get("commit") != sha or \
-            source.get("repository", "").lower() != repo.lower():
+            source.get("repository", "").lower() != repo.lower() or \
+            source.get("simulator") != {"repository": EXPECTED_SIMULATOR, "commit": pin}:
         raise ValueError(f"{kind} artifact belongs to a different source commit")
     return source
 
@@ -161,9 +143,14 @@ def validate_artifact_tree(root: Path, build_path: str):
         raise ValueError("Browser artifact is incomplete")
 
 
-def validate_bundles(browser: Path, firmware: Path, sha: str, repo: str) -> dict:
-    read_source(browser, "browser", sha, repo)
-    fw = read_source(firmware, "firmware", sha, repo)
+def validate_bundles(browser: Path, firmware: Path, sha: str, repo: str, pin: str) -> dict:
+    if browser.is_symlink() or firmware.is_symlink():
+        raise ValueError("Unsafe artifact directory")
+    read_source(browser, "browser", sha, repo, pin)
+    fw = read_source(firmware, "firmware", sha, repo, pin)
+    for path in firmware.rglob("*"):
+        if path.is_symlink() or not path.resolve().is_relative_to(firmware.resolve()):
+            raise ValueError("Unsafe firmware artifact path")
     for name in ("bin/specter-diy.bin", "bin/specter-diy.hex"):
         path = firmware / name
         if not path.is_file() or path.is_symlink():
@@ -172,7 +159,7 @@ def validate_bundles(browser: Path, firmware: Path, sha: str, repo: str) -> dict
         if sha256(path.read_bytes()).hexdigest() != fw["sha256"].get(name):
             raise ValueError(f"Firmware hash mismatch: {name}")
     web = browser / "web"
-    manifest = verify(web, sha, repo)
+    manifest = verify(web, sha, repo, pin, EXPECTED_SIMULATOR)
     pointer = read_json_file(web / "browser/current.json")
     validate_artifact_tree(web, pointer["build"])
     if not manifest.get("experimental"):
@@ -217,6 +204,17 @@ def publish_files(web: Path, pages: Path, number: int | None, sha: str):
     contents = index.read_text().replace('./browser/site.js"', f'./browser/site.js?v={sha[:12]}"')
     index.write_text(contents)
     (pages / ".nojekyll").touch()
+
+
+def newer_preview_exists(pages: Path, number: int, run_id: int) -> bool:
+    path = pages / "pr" / str(number) / ".specter-build.json"
+    if not path.exists():
+        return False
+    record = read_json_file(path)
+    previous = record.get("run_id")
+    if type(previous) is not int or previous <= 0:
+        raise ValueError("Invalid existing preview run ID")
+    return previous > run_id
 
 
 def artifact_id(run_id: int, name: str) -> int:
@@ -283,32 +281,41 @@ def prepare(args):
     # "Manual PR 17 abc1234". Its workflow file path is the stable identity.
     workflow_path = str(run.get("path", "")).split("@", 1)[0]
     if workflow_path != ".github/workflows/build.yml" or \
-            run["event"] not in ("workflow_run", "push", "workflow_dispatch"):
+            run["event"] not in ("pull_request", "push", "workflow_dispatch"):
         raise ValueError("Unrecognized workflow run")
     repository = os.environ["GITHUB_REPOSITORY"]
+    if repository.lower() != EXPECTED_REPOSITORY or \
+            event["repository"]["full_name"].lower() != EXPECTED_REPOSITORY:
+        raise ValueError("Unexpected publisher repository")
+    default_branch = event["repository"]["default_branch"]
+    pin = os.environ["APPROVED_SIMULATOR_COMMIT"]
+    if not re.fullmatch(r"[a-f0-9]{40}", pin):
+        raise ValueError("Invalid approved simulator pin")
     browser = Path(args.browser)
     firmware = Path(args.firmware)
-    if run["event"] in ("workflow_run", "workflow_dispatch"):
-        trusted_target = None
-        if run["event"] == "workflow_run":
-            try:
-                trusted_target = read_json_file(Path(args.target))
-            except (OSError, ValueError, json.JSONDecodeError):
-                return skip("Trusted Build target missing; cannot identify a PR safely")
-        pr = (find_current_target_pr(trusted_target, repository, event["repository"]["default_branch"])
-              if run["event"] == "workflow_run"
-              else find_current_manual_pr(run, repository,
-                                          event["repository"]["default_branch"]))
+    if run["event"] in ("pull_request", "workflow_dispatch"):
+        pr = (find_current_pr(run) if run["event"] == "pull_request"
+              else find_current_manual_pr(run, repository, default_branch))
         if not pr:
             return skip("PR head advanced or PR closed; skip stale workflow run")
+        if pr["number"] not in {item.get("number") for item in run.get("pull_requests", [])} \
+                and run.get("pull_requests"):
+            return skip("Workflow run names another PR")
+        if (pr["base"]["repo"]["full_name"].lower() != repository.lower() or
+                pr["base"]["ref"] != default_branch):
+            return skip("PR targets another repository or branch")
         sha, repo, number = pr["head"]["sha"], pr["head"]["repo"]["full_name"], pr["number"]
     else:
-        if run["head_branch"] not in ("master", "main"):
+        current = api("GET", f"/commits/{quote(default_branch, safe='')}")["sha"]
+        if run["head_branch"] != default_branch or run["head_sha"] != current or \
+                (run.get("head_repository") or {}).get("full_name", "").lower() != repository.lower():
             return skip("Default-branch run is no longer publishable")
         sha, repo, number = run["head_sha"], repository, None
     state = {"skip": False, "number": number, "sha": sha, "repo": repo,
              "run_id": run["id"], "run_url": run["html_url"], "published": False}
     pages = Path(args.pages)
+    if number and newer_preview_exists(pages, number, run["id"]):
+        return skip("A newer run already owns this PR preview")
     if run["conclusion"] == "success":
         try:
             if not args.target:
@@ -319,14 +326,16 @@ def prepare(args):
                     target["repository"].lower() != repo.lower() or \
                     target.get("number") != (number or 0) or \
                     (number and target.get("branch") != pr["head"]["ref"]) or \
-                    not isinstance(target.get("simulator_repository"), str) or \
-                    not isinstance(target.get("simulator_commit"), str):
+                    target.get("base_repository") != repository or \
+                    target.get("base_branch") != default_branch or \
+                    target.get("simulator_repository") != EXPECTED_SIMULATOR or \
+                    target.get("simulator_commit") != pin:
                 raise ValueError("Workflow target does not match current run")
+            manifest = validate_bundles(browser, firmware, sha, repo, pin)
             replace_glue(browser / "web", Path(args.runtime))
-            manifest = validate_bundles(browser, firmware, sha, repo)
+            validate_bundles(browser, firmware, sha, repo, pin)
             simulator = manifest["simulator"]
-            if simulator["repository"].lower() != target["simulator_repository"].lower() or \
-                    simulator["commit"] != target["simulator_commit"]:
+            if simulator != {"repository": EXPECTED_SIMULATOR, "commit": pin}:
                 raise ValueError("Browser simulator tooling does not match workflow target")
         except Exception as error:
             # Artifact content is untrusted data. Any missing or malformed
@@ -336,6 +345,9 @@ def prepare(args):
         else:
             state["simulator"] = simulator
             publish_files(browser / "web", pages, number, sha)
+            if number:
+                marker = pages / "pr" / str(number) / ".specter-build.json"
+                marker.write_text(json.dumps({"run_id": run["id"], "sha": sha}) + "\n")
             state["published"] = True
     if number and not state["published"]:
         target = pages.resolve() / "pr" / str(number)
@@ -345,9 +357,26 @@ def prepare(args):
     return state
 
 
+def recheck(state: dict, default_branch: str):
+    """Abort if the source advanced after staging but before the Pages push."""
+    if state.get("skip"):
+        return
+    number = state.get("number")
+    if number:
+        current = api("GET", f"/pulls/{number}")
+        head, base = current["head"], current["base"]
+        if current["state"] != "open" or head["sha"] != state["sha"] or \
+                head["repo"]["full_name"].lower() != state["repo"].lower() or \
+                base["repo"]["full_name"].lower() != EXPECTED_REPOSITORY or \
+                base["ref"] != default_branch:
+            raise ValueError("PR changed before publication")
+    elif api("GET", f"/commits/{quote(default_branch, safe='')}")["sha"] != state["sha"]:
+        raise ValueError("Default branch advanced before publication")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=("prepare", "comment"))
+    parser.add_argument("phase", choices=("prepare", "recheck", "comment"))
     parser.add_argument("--event")
     parser.add_argument("--target")
     parser.add_argument("--browser")
@@ -358,6 +387,10 @@ def main():
     args = parser.parse_args()
     if args.phase == "prepare":
         print(prepare(args))
+    elif args.phase == "recheck":
+        state = json.loads(Path(args.state).read_text())
+        event = json.loads(Path(args.event).read_text())
+        recheck(state, event["repository"]["default_branch"])
     else:
         state = json.loads(Path(args.state).read_text())
         if not state.get("skip"):
