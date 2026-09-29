@@ -31,9 +31,10 @@ class PublisherTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.browser = self.root / "browser"
         self.firmware = self.root / "firmware"
+        self.runtime = self.root / "trusted-micropython.js"
+        self.runtime.write_bytes(b"trusted Emscripten glue")
         web = self.browser / "web"
-        for name in ("index.html", "assets", "browser/runtime", "browser/site.js",
-                     "browser/runtime-worker.js", "browser/current.json", BUILD_PATH.rstrip("/")):
+        for name in ("browser/current.json", BUILD_PATH.rstrip("/")):
             source, target = ROOT / name, web / name
             target.parent.mkdir(parents=True, exist_ok=True)
             if source.is_dir():
@@ -83,7 +84,7 @@ class PublisherTests(unittest.TestCase):
     def test_stale_pr_head_cannot_be_published(self):
         run = {"head_sha": SHA, "pull_requests": [{"number": 17}]}
         pr = {"number": 17, "state": "open", "merge_commit_sha": "1" * 40,
-              "head": {"sha": "f" * 40, "ref": "feature", "repo": {"full_name": REPO}}}
+              "head": {"sha": "f" * 40, "ref": "feature", "repo": {"full_name": REPO}}, "base": {"ref": "master", "repo": {"full_name": REPO}}}
         with patch.object(publish_preview, "api", return_value=pr):
             self.assertIsNone(publish_preview.find_current_pr(run))
         pr["head"]["sha"] = SHA
@@ -96,7 +97,7 @@ class PublisherTests(unittest.TestCase):
         run = {"head_sha": "2" * 40,
                "pull_requests": [{"number": 17, "head": {"sha": SHA}}]}
         pr = {"number": 17, "state": "open", "merge_commit_sha": "3" * 40,
-              "head": {"sha": SHA, "ref": "feature", "repo": {"full_name": REPO}}}
+              "head": {"sha": SHA, "ref": "feature", "repo": {"full_name": REPO}}, "base": {"ref": "master", "repo": {"full_name": REPO}}}
         with patch.object(publish_preview, "api", return_value=pr):
             self.assertEqual(publish_preview.find_current_pr(run), pr)
             run["pull_requests"][0]["head"]["sha"] = "f" * 40
@@ -107,7 +108,7 @@ class PublisherTests(unittest.TestCase):
         run = {"head_sha": SHA, "head_branch": "feature",
                "head_repository": {"full_name": REPO}, "pull_requests": []}
         pr = {"number": 17, "state": "open", "merge_commit_sha": "1" * 40,
-              "head": {"sha": SHA, "ref": "feature", "repo": {"full_name": REPO}}}
+              "head": {"sha": SHA, "ref": "feature", "repo": {"full_name": REPO}}, "base": {"ref": "master", "repo": {"full_name": REPO}}}
         calls = []
         def list_pulls(method, path, body=None):
             calls.append(path)
@@ -188,13 +189,16 @@ class PublisherTests(unittest.TestCase):
         (preview / "index.html").write_text("newer preview")
         event = self.root / "event.json"
         state = self.root / "state.json"
-        event.write_text(json.dumps({"workflow_run": {
-            "name": "PR 17", "path": ".github/workflows/build.yml", "event": "pull_request", "conclusion": "failure",
+        target = self.root / "target.json"
+        target.write_text(json.dumps({"event": "workflow_run", "number": 17,
+                                      "commit": SHA, "repository": REPO, "branch": "feature"}))
+        event.write_text(json.dumps({"repository": {"default_branch": "master"}, "workflow_run": {
+            "name": "PR 17", "display_title": f"PR 17 {SHA}", "path": ".github/workflows/build.yml", "event": "workflow_run", "conclusion": "failure",
             "head_sha": SHA, "pull_requests": [{"number": 17}],
         }}))
         pr = {"number": 17, "state": "open", "merge_commit_sha": "1" * 40,
-              "head": {"sha": "f" * 40, "ref": "feature", "repo": {"full_name": REPO}}}
-        args = SimpleNamespace(event=event, target=self.root / "missing-target.json", state=state,
+              "head": {"sha": "f" * 40, "ref": "feature", "repo": {"full_name": REPO}}, "base": {"ref": "master", "repo": {"full_name": REPO}}}
+        args = SimpleNamespace(event=event, runtime=self.runtime, target=target, state=state,
                                browser=self.browser, firmware=self.firmware, pages=self.root / "pages")
         with patch.dict("os.environ", {"GITHUB_REPOSITORY": REPO}), \
                 patch.object(publish_preview, "api", return_value=pr):
@@ -206,27 +210,31 @@ class PublisherTests(unittest.TestCase):
     def test_matching_success_still_publishes_with_target_cross_check(self):
         event = self.root / "event.json"
         target = self.root / "target.json"
-        event.write_text(json.dumps({"workflow_run": {
+        event.write_text(json.dumps({"repository": {"default_branch": "master"}, "workflow_run": {
             "id": 22, "html_url": "https://github.com/example/actions/runs/22",
-            "name": "PR 17", "path": ".github/workflows/build.yml", "event": "pull_request", "conclusion": "success",
+            "name": "PR 17", "display_title": f"PR 17 {SHA}", "path": ".github/workflows/build.yml", "event": "workflow_run", "conclusion": "success",
             "head_sha": SHA, "pull_requests": [{"number": 17}],
         }}))
-        target.write_text(json.dumps({"event": "pull_request", "number": 17,
+        target.write_text(json.dumps({"event": "workflow_run", "number": 17,
                                       "commit": SHA, "repository": REPO, "branch": "feature",
                                       "simulator_repository": SIMULATOR_REPO,
                                       "simulator_commit": SIMULATOR_SHA}))
         pr = {"number": 17, "state": "open", "merge_commit_sha": "1" * 40,
-              "head": {"sha": SHA, "ref": "feature", "repo": {"full_name": REPO}}}
+              "head": {"sha": SHA, "ref": "feature", "repo": {"full_name": REPO}}, "base": {"ref": "master", "repo": {"full_name": REPO}}}
         pages = self.root / "pages"
-        args = SimpleNamespace(event=event, target=target, state=self.root / "state.json",
+        args = SimpleNamespace(event=event, runtime=self.runtime, target=target, state=self.root / "state.json",
                                browser=self.browser, firmware=self.firmware, pages=pages)
+        (self.browser / "web" / BUILD_PATH / "micropython.js").write_bytes(
+            b"postMessage({type:'log',message:'PR supplied JavaScript'})")
         with patch.dict("os.environ", {"GITHUB_REPOSITORY": REPO}), \
                 patch.object(publish_preview, "api", return_value=pr):
             result = publish_preview.prepare(args)
         self.assertTrue(result["published"])
         self.assertTrue((pages / "pr/17/index.html").is_file())
+        self.assertEqual((pages / "pr/17" / BUILD_PATH / "micropython.js").read_bytes(),
+                         self.runtime.read_bytes())
 
-    def test_failed_current_build_removes_preview_without_any_artifacts(self):
+    def test_failed_current_build_removes_preview_with_trusted_target(self):
         pages = self.root / "pages"
         preview = pages / "pr/17"
         preview.mkdir(parents=True)
@@ -234,24 +242,27 @@ class PublisherTests(unittest.TestCase):
         (pages / "index.html").write_text("stable site")
         event = self.root / "event.json"
         state = self.root / "state.json"
-        event.write_text(json.dumps({"workflow_run": {
+        target = self.root / "target.json"
+        target.write_text(json.dumps({"event": "workflow_run", "number": 17,
+                                      "commit": SHA, "repository": REPO, "branch": "feature"}))
+        event.write_text(json.dumps({"repository": {"default_branch": "master"}, "workflow_run": {
             "id": 22, "html_url": "https://github.com/example/actions/runs/22",
-            "name": "PR 17", "path": ".github/workflows/build.yml", "event": "pull_request", "conclusion": "failure",
+            "name": "PR 17", "display_title": f"PR 17 {SHA}", "path": ".github/workflows/build.yml", "event": "workflow_run", "conclusion": "failure",
             "head_sha": SHA, "head_branch": "feature",
             "head_repository": {"full_name": REPO}, "pull_requests": [],
         }}))
         pr = {"number": 17, "state": "open", "merge_commit_sha": "1" * 40,
-              "head": {"sha": SHA, "ref": "feature", "repo": {"full_name": REPO}}}
+              "head": {"sha": SHA, "ref": "feature", "repo": {"full_name": REPO}}, "base": {"ref": "master", "repo": {"full_name": REPO}}}
         calls = []
         def fake_api(method, path, body=None):
             calls.append((method, path, body))
-            if path.startswith("/pulls?"):
-                return [pr]
+            if path.startswith("/pulls/"):
+                return pr
             if path.startswith("/issues/") and method == "GET":
                 return [{"id": 9, "body": publish_preview.MARKER,
                          "user": {"login": "github-actions[bot]"}}]
             return None
-        args = SimpleNamespace(event=event, target=self.root / "missing-target.json",
+        args = SimpleNamespace(event=event, runtime=self.runtime, target=target,
                                state=state, browser=self.root / "missing-browser",
                                firmware=self.root / "missing-firmware", pages=pages)
         with patch.dict("os.environ", {"GITHUB_REPOSITORY": REPO}), \
@@ -274,22 +285,22 @@ class PublisherTests(unittest.TestCase):
         preview.mkdir(parents=True)
         (preview / "index.html").write_text("old preview")
         event = self.root / "event.json"
-        event.write_text(json.dumps({"workflow_run": {
+        event.write_text(json.dumps({"repository": {"default_branch": "master"}, "workflow_run": {
             "id": 22, "html_url": "https://github.com/example/actions/runs/22",
-            "name": "PR 17", "path": ".github/workflows/build.yml", "event": "pull_request", "conclusion": "success",
+            "name": "PR 17", "display_title": f"PR 17 {SHA}", "path": ".github/workflows/build.yml", "event": "workflow_run", "conclusion": "success",
             "head_sha": SHA, "pull_requests": [{"number": 17}],
         }}))
         pr = {"number": 17, "state": "open", "merge_commit_sha": "1" * 40,
-              "head": {"sha": SHA, "ref": "feature", "repo": {"full_name": REPO}}}
-        args = SimpleNamespace(event=event, target=self.root / "missing-target.json",
+              "head": {"sha": SHA, "ref": "feature", "repo": {"full_name": REPO}}, "base": {"ref": "master", "repo": {"full_name": REPO}}}
+        args = SimpleNamespace(event=event, runtime=self.runtime, target=self.root / "missing-target.json",
                                state=self.root / "state.json", browser=self.browser,
                                firmware=self.firmware, pages=pages)
         with patch.dict("os.environ", {"GITHUB_REPOSITORY": REPO}), \
                 patch.object(publish_preview, "api", return_value=pr):
             result = publish_preview.prepare(args)
-        self.assertFalse(result["published"])
-        self.assertIn("missing-target.json", result["reason"])
-        self.assertFalse(preview.exists())
+        self.assertTrue(result["skip"])
+        self.assertIn("Trusted Build target missing", result["reason"])
+        self.assertTrue(preview.exists())
 
     def test_success_rejects_artifact_target_for_another_pr(self):
         pages = self.root / "pages"
@@ -298,25 +309,24 @@ class PublisherTests(unittest.TestCase):
         (preview / "index.html").write_text("old preview")
         event = self.root / "event.json"
         target = self.root / "target.json"
-        event.write_text(json.dumps({"workflow_run": {
+        event.write_text(json.dumps({"repository": {"default_branch": "master"}, "workflow_run": {
             "id": 22, "html_url": "https://github.com/example/actions/runs/22",
-            "name": "PR 17", "path": ".github/workflows/build.yml", "event": "pull_request", "conclusion": "success",
+            "name": "PR 17", "display_title": f"PR 17 {SHA}", "path": ".github/workflows/build.yml", "event": "workflow_run", "conclusion": "success",
             "head_sha": SHA, "pull_requests": [{"number": 17}],
         }}))
-        target.write_text(json.dumps({"event": "pull_request", "number": 18,
+        target.write_text(json.dumps({"event": "workflow_run", "number": 18,
                                       "commit": SHA, "repository": REPO, "branch": "feature",
                                       "simulator_repository": SIMULATOR_REPO,
                                       "simulator_commit": SIMULATOR_SHA}))
         pr = {"number": 17, "state": "open", "merge_commit_sha": "1" * 40,
-              "head": {"sha": SHA, "ref": "feature", "repo": {"full_name": REPO}}}
-        args = SimpleNamespace(event=event, target=target, state=self.root / "state.json",
+              "head": {"sha": SHA, "ref": "feature", "repo": {"full_name": REPO}}, "base": {"ref": "master", "repo": {"full_name": REPO}}}
+        args = SimpleNamespace(event=event, runtime=self.runtime, target=target, state=self.root / "state.json",
                                browser=self.browser, firmware=self.firmware, pages=pages)
         with patch.dict("os.environ", {"GITHUB_REPOSITORY": REPO}), \
                 patch.object(publish_preview, "api", return_value=pr):
             result = publish_preview.prepare(args)
-        self.assertFalse(result["published"])
-        self.assertIn("does not match current run", result["reason"])
-        self.assertFalse(preview.exists())
+        self.assertTrue(result["skip"])
+        self.assertTrue(preview.exists())
 
     def test_manual_failure_without_artifacts_removes_current_preview(self):
         platform_sha = "b" * 40
@@ -336,7 +346,7 @@ class PublisherTests(unittest.TestCase):
         pr = {"number": 17, "state": "open", "head": {
             "sha": SHA, "ref": "feature", "repo": {"full_name": REPO}},
             "base": {"ref": "master", "repo": {"full_name": REPO}}}
-        args = SimpleNamespace(event=event, target=self.root / "missing-target.json",
+        args = SimpleNamespace(event=event, runtime=self.runtime, target=self.root / "missing-target.json",
                                state=self.root / "state.json", browser=self.root / "missing-browser",
                                firmware=self.root / "missing-firmware", pages=pages)
         with patch.dict("os.environ", {"GITHUB_REPOSITORY": REPO}), \
@@ -380,7 +390,7 @@ class PublisherTests(unittest.TestCase):
         pr = {"number": 17, "state": "open", "head": {
             "sha": SHA, "ref": "feature", "repo": {"full_name": REPO}},
             "base": {"ref": "master", "repo": {"full_name": REPO}}}
-        args = SimpleNamespace(event=event, target=target, state=self.root / "state.json",
+        args = SimpleNamespace(event=event, runtime=self.runtime, target=target, state=self.root / "state.json",
                                browser=self.browser, firmware=self.firmware, pages=self.root / "pages")
         with patch.dict("os.environ", {"GITHUB_REPOSITORY": REPO}), \
                 patch.object(publish_preview, "api", return_value=pr), \
@@ -401,13 +411,13 @@ class PublisherTests(unittest.TestCase):
 
     def test_default_branch_run_uses_workflow_path_not_dynamic_name(self):
         event = self.root / "event.json"
-        event.write_text(json.dumps({"workflow_run": {
+        event.write_text(json.dumps({"repository": {"default_branch": "master"}, "workflow_run": {
             "id": 23, "html_url": "https://github.com/example/actions/runs/23",
             "name": SHA, "path": ".github/workflows/build.yml@master",
             "event": "push", "conclusion": "failure", "head_sha": SHA,
             "head_branch": "master",
         }}))
-        args = SimpleNamespace(event=event, target=self.root / "missing-target.json",
+        args = SimpleNamespace(event=event, runtime=self.runtime, target=self.root / "missing-target.json",
                                state=self.root / "state.json", browser=self.root / "missing-browser",
                                firmware=self.root / "missing-firmware", pages=self.root / "pages")
         with patch.dict("os.environ", {"GITHUB_REPOSITORY": REPO}):

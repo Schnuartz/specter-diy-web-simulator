@@ -12,9 +12,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "browser"))
 from verify_build import verify  # type: ignore[import-not-found]
+from replace_glue import replace_glue  # type: ignore[import-not-found]
 
 MARKER = "<!-- specter-pr-build-comment -->"
 MANUAL_RUN = re.compile(r"Manual PR[ \t]+([1-9][0-9]{0,6})[ \t]+([a-f0-9]{7,40})[ \t]*")
+TRUSTED_WEB = Path(__file__).resolve().parents[1]
 
 
 def read_json_file(path: Path) -> dict:
@@ -111,6 +113,29 @@ def find_current_manual_pr(run: dict, repository: str, default_branch: str) -> d
     return pr
 
 
+def find_current_target_pr(target: dict, repository: str, default_branch: str) -> dict | None:
+    """Bind the trusted Build target artifact to the current PR head."""
+    number = target.get("number")
+    sha = target.get("commit")
+    source_repository = target.get("repository")
+    branch = target.get("branch")
+    if target.get("event") != "workflow_run" or type(number) is not int or \
+            not 0 < number < 1_000_000 or not isinstance(sha, str) or \
+            not re.fullmatch(r"[a-f0-9]{40}", sha) or \
+            not isinstance(source_repository, str) or not isinstance(branch, str):
+        return None
+    pr = api("GET", f"/pulls/{number}")
+    head = pr.get("head") or {}
+    base = pr.get("base") or {}
+    if pr.get("number") != number or pr.get("state") != "open" or head.get("sha") != sha or \
+            (head.get("repo") or {}).get("full_name", "").lower() != source_repository.lower() or \
+            head.get("ref") != branch or \
+            (base.get("repo") or {}).get("full_name", "").lower() != repository.lower() or \
+            base.get("ref") != default_branch:
+        return None
+    return pr
+
+
 def read_source(directory: Path, kind: str, sha: str, repo: str) -> dict:
     source = read_json_file(directory / "source.json")
     if source.get("kind") != kind or source.get("commit") != sha or \
@@ -119,17 +144,21 @@ def read_source(directory: Path, kind: str, sha: str, repo: str) -> dict:
     return source
 
 
-def validate_artifact_tree(root: Path):
+def validate_artifact_tree(root: Path, build_path: str):
     if not root.is_dir():
         raise ValueError("Browser artifact directory missing")
+    allowed = {"browser/current.json"} | {
+        build_path + name for name in
+        ("build-info.json", "micropython.js", "micropython.wasm", "micropython.data")
+    }
     for path in root.rglob("*"):
         if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
             raise ValueError("Unsafe artifact path")
         relative = path.relative_to(root).as_posix()
-        if path.is_file() and not (relative == "index.html" or
-            relative.startswith(("assets/", "browser/runtime/", "builds/")) or
-            relative in {"browser/site.js", "browser/runtime-worker.js", "browser/current.json"}):
+        if path.is_file() and relative not in allowed:
             raise ValueError(f"Unexpected browser artifact: {relative}")
+    if not all((root / name).is_file() for name in allowed):
+        raise ValueError("Browser artifact is incomplete")
 
 
 def validate_bundles(browser: Path, firmware: Path, sha: str, repo: str) -> dict:
@@ -143,19 +172,21 @@ def validate_bundles(browser: Path, firmware: Path, sha: str, repo: str) -> dict
         if sha256(path.read_bytes()).hexdigest() != fw["sha256"].get(name):
             raise ValueError(f"Firmware hash mismatch: {name}")
     web = browser / "web"
-    validate_artifact_tree(web)
     manifest = verify(web, sha, repo)
+    pointer = read_json_file(web / "browser/current.json")
+    validate_artifact_tree(web, pointer["build"])
     if not manifest.get("experimental"):
         raise ValueError("Development build warning missing from manifest")
-    if "NEVER ENTER A REAL SEED PHRASE" not in (web / "index.html").read_text():
+    if "NEVER ENTER A REAL SEED PHRASE" not in (TRUSTED_WEB / "index.html").read_text():
         raise ValueError("Development build warning missing from page")
     for name in ("browser/site.js", "browser/runtime-worker.js"):
-        if not (web / name).is_file():
+        if not (TRUSTED_WEB / name).is_file():
             raise ValueError(f"Missing browser shell: {name}")
     return manifest
 
 
 def publish_files(web: Path, pages: Path, number: int | None, sha: str):
+    """Publish only firmware data from the build artifact; supply our own shell."""
     pages = pages.resolve()
     target = pages / "pr" / str(number) if number else pages
     if not target.resolve().is_relative_to(pages) or pages == target and number:
@@ -163,13 +194,25 @@ def publish_files(web: Path, pages: Path, number: int | None, sha: str):
     if number and target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True, exist_ok=True)
-    for name in ("index.html", "assets", "browser", "builds"):
-        source = web / name
+    if number is None:
+        # Replace stale stable-site shell files without disturbing PR previews.
+        for name in ("index.html", "assets", "browser", "builds"):
+            old = target / name
+            if old.is_symlink():
+                raise ValueError(f"Unsafe existing Pages path: {name}")
+            if old.is_dir():
+                shutil.rmtree(old)
+            elif old.exists():
+                old.unlink()
+    for name in ("index.html", "assets", "browser"):
+        source = TRUSTED_WEB / name
         destination = target / name
         if source.is_dir():
             shutil.copytree(source, destination, dirs_exist_ok=True)
         else:
             shutil.copy2(source, destination)
+    shutil.copy2(web / "browser/current.json", target / "browser/current.json")
+    shutil.copytree(web / "builds", target / "builds", dirs_exist_ok=True)
     index = target / "index.html"
     contents = index.read_text().replace('./browser/site.js"', f'./browser/site.js?v={sha[:12]}"')
     index.write_text(contents)
@@ -240,13 +283,20 @@ def prepare(args):
     # "Manual PR 17 abc1234". Its workflow file path is the stable identity.
     workflow_path = str(run.get("path", "")).split("@", 1)[0]
     if workflow_path != ".github/workflows/build.yml" or \
-            run["event"] not in ("pull_request", "push", "workflow_dispatch"):
+            run["event"] not in ("workflow_run", "push", "workflow_dispatch"):
         raise ValueError("Unrecognized workflow run")
     repository = os.environ["GITHUB_REPOSITORY"]
     browser = Path(args.browser)
     firmware = Path(args.firmware)
-    if run["event"] in ("pull_request", "workflow_dispatch"):
-        pr = (find_current_pr(run) if run["event"] == "pull_request"
+    if run["event"] in ("workflow_run", "workflow_dispatch"):
+        trusted_target = None
+        if run["event"] == "workflow_run":
+            try:
+                trusted_target = read_json_file(Path(args.target))
+            except (OSError, ValueError, json.JSONDecodeError):
+                return skip("Trusted Build target missing; cannot identify a PR safely")
+        pr = (find_current_target_pr(trusted_target, repository, event["repository"]["default_branch"])
+              if run["event"] == "workflow_run"
               else find_current_manual_pr(run, repository,
                                           event["repository"]["default_branch"]))
         if not pr:
@@ -272,6 +322,7 @@ def prepare(args):
                     not isinstance(target.get("simulator_repository"), str) or \
                     not isinstance(target.get("simulator_commit"), str):
                 raise ValueError("Workflow target does not match current run")
+            replace_glue(browser / "web", Path(args.runtime))
             manifest = validate_bundles(browser, firmware, sha, repo)
             simulator = manifest["simulator"]
             if simulator["repository"].lower() != target["simulator_repository"].lower() or \
@@ -301,6 +352,7 @@ def main():
     parser.add_argument("--target")
     parser.add_argument("--browser")
     parser.add_argument("--firmware")
+    parser.add_argument("--runtime")
     parser.add_argument("--pages")
     parser.add_argument("--state", required=True)
     args = parser.parse_args()

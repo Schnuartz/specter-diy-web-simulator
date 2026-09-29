@@ -79,12 +79,23 @@ records, and the browser `build-info.json` carries both provenance records.
 The build workflow has **read-only** repository permissions and no deployment
 secret.
 
-When the tooling is moved to its own repository, the caller only needs to
-change the `uses:` target to a full simulator-workflow SHA and pass that
-repository/SHA as the two simulator inputs. The workflow should remain a
-reusable workflow, not a cross-repository dispatch: the caller's token and
-Pages/PR context then stay in the Specter repository, which keeps fork builds
-usable without PATs or cross-repository write credentials.
+The firmware repository calls the reusable workflows on simulator `main`.
+Each run resolves the current `main` commit and checks out that exact revision
+as tooling. This deliberately follows `main` without a repository-level pin.
+The workflow remains reusable so the caller retains its token and Pages
+context.
+
+For PRs, a read-only `pull_request` workflow only requests a build. Its
+completion triggers the Build workflow and target resolver from the firmware
+repository's default branch. PR source runs only in jobs with read-only
+permissions. A separate job builds Emscripten JavaScript from
+default-branch firmware and trusted simulator tooling. The PR build supplies
+WebAssembly and frozen firmware data. Before publication, the publisher
+replaces the PR build's generated JavaScript with the trusted runtime and
+updates its artifact hashes. HTML, CSS, images, UI logic, worker, peripheral
+implementation, and the experimental warning come from the publisher's
+simulator checkout. Its worker inherits a CSP allowing same-site assets and
+the local Virtual Host on port 8788 while blocking other outbound connections.
 
 A separate `Publish browser simulator` workflow runs from the trusted default
 branch after `Build` completes. It verifies that the browser manifest, its
@@ -92,16 +103,24 @@ artifact hashes, the firmware hashes, and both provenance records identify the
 same still-current PR head. It never executes the downloaded build. A passing
 default-branch build updates the stable Pages root; a passing PR build updates
 `/pr/<number>/` and a single PR comment with links to the simulator, firmware
-artifact, and build log. A failed current PR build removes its stale preview
-and replaces that one comment with a failure notice, even when it uploaded no
-artifacts. Missing or invalid artifacts from a nominally successful run also
-invalidate its current PR preview. The failure path identifies the PR from the
-trusted `workflow_run` event and GitHub's pull-request API; the untrusted
-`build-target` artifact is cross-checked only for successful runs. A run
+artifact, and build log. A failed current PR build with a trusted Build target
+removes its stale preview and replaces that one comment with a failure notice,
+even when it uploaded no browser or firmware artifacts. If the trusted target
+itself is missing, the publisher skips the run rather than guessing a PR.
+The target comes from the default-branch Build workflow's resolver job and is
+cross-checked against GitHub's pull-request API. A run
 superseded by a newer PR commit cannot replace the current preview. The
 publisher keeps an
 `gh-pages` branch as static state and uses `actions/deploy-pages` to deploy the
 complete tree. PRs receive no write token or deployment credentials.
+
+Deploy the simulator changes to its trusted `main` branch before enabling the
+new firmware workflow on the firmware default branch. Remove legacy PR
+previews from `gh-pages` once, then rebuild open PRs so old published shells
+cannot remain reachable. GitHub Pages must use **GitHub Actions** as its
+deployment source. A PR with new C imports may require a compatible trusted
+Emscripten runtime update before its WebAssembly can run; the browser smoke
+tests must pass with the combined artifacts.
 
 ### Rebuild an older open PR without a commit
 

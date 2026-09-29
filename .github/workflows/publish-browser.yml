@@ -47,8 +47,7 @@ jobs:
           path: simulator-tools
       # A failed PR run may have uploaded no artifacts at all. Its old preview
       # still needs to be removed using only the trusted workflow_run event.
-      - name: Download workflow target for successful builds
-        if: github.event.workflow_run.conclusion == 'success'
+      - name: Download trusted Build target
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -66,6 +65,7 @@ jobs:
           mkdir -p /tmp/specter-artifacts/browser /tmp/specter-artifacts/firmware
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name browser-simulator --dir /tmp/specter-artifacts/browser
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name firmware-binaries --dir /tmp/specter-artifacts/firmware
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name trusted-runtime --dir /tmp/specter-artifacts/runtime
       - name: Prepare GitHub Pages branch
         run: |
           if git fetch origin gh-pages:refs/remotes/origin/gh-pages; then
@@ -87,6 +87,7 @@ jobs:
             --target /tmp/specter-artifacts/target/target.json \
             --browser /tmp/specter-artifacts/browser \
             --firmware /tmp/specter-artifacts/firmware \
+            --runtime /tmp/specter-artifacts/runtime/trusted-micropython.js \
             --pages pages --state /tmp/specter-preview-state.json
           if test -f pages/index.html || test -d pages/pr; then
             echo 'has_site=true' >> "$GITHUB_OUTPUT"
