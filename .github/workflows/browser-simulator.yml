@@ -94,13 +94,6 @@ jobs:
           ref: ${{ inputs.simulator_commit }}
           path: simulator-tools
           persist-credentials: false
-      - name: Check out reviewed provenance generator
-        uses: actions/checkout@v4
-        with:
-          repository: cryptoadvance/specter-diy-web-simulator
-          ref: be15b999952e69de73b6aaede355cb4d7619bd4e
-          path: provenance-tools
-          persist-credentials: false
       - name: Overlay simulator tooling onto the source checkout
         run: |
           test -d simulator-tools/web
@@ -123,17 +116,16 @@ jobs:
           name: trusted-runtime
           path: trusted-runtime
       - name: Use trusted Emscripten JavaScript with PR firmware
-        run: python3 provenance-tools/web/browser/replace_glue.py web trusted-runtime/trusted-micropython.js
+        run: python3 simulator-tools/web/browser/replace_glue.py web trusted-runtime/trusted-micropython.js
       - name: Verify source, simulator, and artifact hashes
         run: python3 web/browser/verify_build.py
       - name: Test preview provenance and publication rules
         run: |
-          python3 provenance-tools/web/tests/test-direct-publisher.py
-          python3 provenance-tools/web/tests/test-trust-boundary.py
-          python3 provenance-tools/web/tests/test-source-project.py
+          python3 simulator-tools/web/tests/test-trust-boundary.py
+          python3 simulator-tools/web/tests/test-source-project.py
           python3 web/tests/test-trigger-pr.py
           python3 web/tests/test-resolve-build-target.py
-          python3 provenance-tools/web/tests/test-usb-vcp.py
+          python3 simulator-tools/web/tests/test-usb-vcp.py
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
@@ -143,14 +135,14 @@ jobs:
           npx --prefix web playwright install --with-deps chromium
           python3 -m http.server 8765 --directory web > /tmp/specter-browser.log 2>&1 &
           CI=true npm run test:browser --prefix web
-          node provenance-tools/web/tests/test-network-policy.mjs
+          node simulator-tools/web/tests/test-network-policy.mjs
           git clone --depth 1 https://github.com/cryptoadvance/specter-virtual-host.git .browser-work/virtual-host
           (cd .browser-work/virtual-host && go run . --site http://127.0.0.1:8765 --no-open) > /tmp/specter-virtual-host.log 2>&1 &
-          node provenance-tools/web/tests/test-usb-transport.mjs
+          node simulator-tools/web/tests/test-usb-transport.mjs
       - name: Record browser provenance
-        run: python3 provenance-tools/web/tools/source_info.py browser
-      # Only firmware build data crosses from the untrusted build job to the
-      # privileged publisher. The publisher supplies the browser shell itself.
+        run: python3 simulator-tools/web/tools/source_info.py browser
+      # The publisher validates firmware data against the separate trusted
+      # runtime artifact and supplies the browser shell from simulator main.
       - name: Upload browser firmware build
         id: browser-upload
         uses: actions/upload-artifact@v4

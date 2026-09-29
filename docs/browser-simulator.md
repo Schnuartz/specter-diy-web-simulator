@@ -36,7 +36,7 @@ Specter-DIY checkout:
    from this repository's root. The source checkout must be at the exact
    commit you intend to simulate.
 3. Run `python3 web/browser/verify_build.py` and
-   `python3 web/tests/test-direct-publisher.py`.
+   `python3 web/tests/test-source-project.py`.
 4. Run `npm ci --prefix web`, `npx --prefix web playwright install chromium`,
    then `python3 -m http.server 8765 --directory web` in one shell and
    `CI=true npm run test:browser --prefix web` in another. Run
@@ -79,21 +79,20 @@ records, and the browser `build-info.json` carries both provenance records.
 The build workflow has **read-only** repository permissions and no deployment
 secret.
 
-The firmware repository pins both reusable workflow definitions to reviewed
-full commit SHAs, then resolves the current simulator `main` SHA for the
-tooling checkout. Build metadata generation and privileged publisher
-validation remain on reviewed simulator revisions; moving `main` supplies the
-simulator implementation, not the rules that trust or publish its artifacts.
-The workflow remains reusable so the caller retains its token and Pages
-context.
+The firmware repository calls the reusable browser workflow from simulator
+`main`, resolves its current SHA once, and uses that SHA for all simulator
+tooling checkouts. The privileged publisher implementation lives in the
+firmware repository's protected default branch. The workflow remains reusable
+so the caller retains its token and Pages context.
 
 For PRs, the read-only `Build` workflow runs directly on `pull_request` and
 uses the exact PR head repository and SHA from the event. PR source runs only
 in jobs with read-only permissions. A separate job builds Emscripten JavaScript from
 default-branch firmware and trusted simulator tooling. The PR build supplies
-WebAssembly and frozen firmware data. Before publication, the publisher
-replaces the PR build's generated JavaScript with the trusted runtime and
-updates its artifact hashes. HTML, CSS, images, UI logic, worker, peripheral
+WebAssembly and frozen firmware data. The read-only build replaces the PR
+build's generated JavaScript with its trusted runtime and updates artifact
+hashes. The publisher verifies this runtime against the separate runtime
+artifact. HTML, CSS, images, UI logic, worker, peripheral
 implementation, and the experimental warning come from the publisher's
 simulator checkout. Its worker inherits a CSP allowing same-site assets and
 the local Virtual Host on port 8788 while blocking other outbound connections.

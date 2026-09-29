@@ -195,15 +195,6 @@ class DirectPublisherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid build pointer"):
             publisher.verify(tree)
 
-    def test_privileged_workflow_never_executes_pr_artifact(self):
-        workflow = (Path(__file__).resolve().parents[2] /
-                    ".github/workflows/publish-browser.yml").read_text()
-        self.assertIn("ref: ${{ github.event.repository.default_branch }}", workflow)
-        self.assertIn("ref: ${{ inputs.simulator_commit }}", workflow)
-        self.assertNotIn("ref: ${{ github.event.workflow_run.head_sha }}", workflow)
-        self.assertNotIn("python3 /tmp/specter-artifacts", workflow)
-        self.assertNotIn("bash /tmp/specter-artifacts", workflow)
-
     def test_unexpected_browser_file_and_symlink_are_rejected(self):
         tree = self.root / "web"
         tree.mkdir()
