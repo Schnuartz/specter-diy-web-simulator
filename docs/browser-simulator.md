@@ -79,10 +79,13 @@ records, and the browser `build-info.json` carries both provenance records.
 The build workflow has **read-only** repository permissions and no deployment
 secret.
 
-The firmware repository references both reusable workflows and all simulator
-tooling with the same reviewed full commit SHA. Updating simulator tooling
-requires an explicit pin change in the firmware repository. The workflow
-remains reusable so the caller retains its token and Pages context.
+The firmware repository pins both reusable workflow definitions to reviewed
+full commit SHAs, then resolves the current simulator `main` SHA for the
+tooling checkout. Build metadata generation and privileged publisher
+validation remain on reviewed simulator revisions; moving `main` supplies the
+simulator implementation, not the rules that trust or publish its artifacts.
+The workflow remains reusable so the caller retains its token and Pages
+context.
 
 For PRs, the read-only `Build` workflow runs directly on `pull_request` and
 uses the exact PR head repository and SHA from the event. PR source runs only
