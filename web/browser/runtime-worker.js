@@ -289,6 +289,15 @@ function handle(data) {
       if (qrQueue.length >= 16) qrQueue.shift();
       qrQueue.push(bytes);
       flushQr();
+    } else if (data.type === 'usb-data') {
+      const incoming = data.bytes instanceof Uint8Array ? data.bytes : new Uint8Array(data.bytes);
+      const path = '/bridge/usb-in.bin';
+      const previous = fs.analyzePath(path).exists ? fs.readFile(path) : new Uint8Array();
+      if (previous.byteLength + incoming.byteLength > (1 << 20)) throw new Error('USB receive queue is full');
+      const combined = new Uint8Array(previous.byteLength + incoming.byteLength);
+      combined.set(previous);
+      combined.set(incoming, previous.byteLength);
+      fs.writeFile(path, combined);
     } else if (data.type === 'card-insert') {
       const slot = cardSlot(data.slot);
       if (!fs.analyzePath(`/state/cards/${slot}/private.key`).exists) createCard(fs, slot);
@@ -324,6 +333,14 @@ function handle(data) {
     send('operation-error', { operation: data.type, name: error?.name, code: error?.code,
       message: error?.message || String(error), ...storage });
   }
+}
+function flushUsb(fs) {
+  const path = '/bridge/usb-out.bin';
+  if (!fs.analyzePath(path).exists) return;
+  const bytes = fs.readFile(path);
+  if (!bytes.byteLength) return;
+  fs.unlink(path);
+  send('usb-output', { bytes });
 }
 onmessage = async ({ data }) => {
   if (data.type !== 'start') {
@@ -382,6 +399,7 @@ onmessage = async ({ data }) => {
           runtimeReady = true;
           for (const item of pending.splice(0)) handle(item);
           setInterval(flushQr, 50);
+          setInterval(() => flushUsb(Module.FS), 20);
           setInterval(pollScanner, 80);
           pollScanner();
           setTimeout(() => send('running'), 500);

@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline' 'unsafe-eval'; worker-src 'self' blob:; connect-src 'self' http://127.0.0.1:8788 http://localhost:8788 ws://127.0.0.1:8788 ws://localhost:8788; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Specter DIY — Browser Simulator</title>
   <meta name="description" content="Run the real Specter DIY firmware locally in your browser. Test seeds only; this simulator is not a hardware wallet.">
@@ -311,12 +312,21 @@
     .gallery .warning, .gallery .device-actions, .gallery .sim-panel, .gallery .status-card { display:none; }
     .gallery .phone-wrapper { width:100%; height:100%; max-width:none; }
     .gallery .phone-wrapper .phone-mockup { display:none; }
+    .virtual-host { border:1px solid #3a4d61; border-radius:10px; padding:16px; background:#182434; }
+    .virtual-host[hidden] { display:none; }
+    .virtual-host h2 { margin-top:0; }
+    .virtual-host-status { display:flex; gap:24px; flex-wrap:wrap; }
+    .virtual-host-status strong { color:#8fe0a4; }
+    .virtual-host-status .waiting { color:#ffd17d; }
+    .virtual-host-settings { color:#8fd2ff; }
+    .gallery .virtual-host { display:none; }
     .gallery #screen-overlay { left:0; top:0; width:100%; height:100%; border-radius:0; }
     @media (min-width:900px) {
-      .page { display:grid; grid-template-columns:380px 380px; grid-template-areas:'warning warning' 'device peripherals' 'restart peripherals' 'hardware hardware' 'demo demo' 'technical technical'; gap:16px 22px; width:100%; max-width:822px; margin:auto; align-items:start; }
+      .page { display:grid; grid-template-columns:380px 380px; grid-template-areas:'warning warning' 'device peripherals' 'restart peripherals' 'virtual-host virtual-host' 'hardware hardware' 'demo demo' 'technical technical'; gap:16px 22px; width:100%; max-width:822px; margin:auto; align-items:start; }
       .warning { grid-area:warning; max-width:280px; justify-self:center; }
       .phone-wrapper { grid-area:device; }
       .device-actions { grid-area:restart; }
+      .virtual-host { grid-area:virtual-host; }
       .sim-panel { grid-area:peripherals; }
       .hardware-link { grid-area:hardware; justify-self:center; margin-top:16px; }
       .demo-import { grid-area:demo; justify-self:center; }
@@ -397,7 +407,6 @@
 
   <section class="sim-panel" aria-label="Simulator and peripherals">
     <h2>Simulator</h2>
-    <p>To connect this simulated device to wallet software, run the <a href="https://github.com/cryptoadvance/specter-virtual-host/releases/latest">Specter Virtual Host</a> on this computer.</p>
     <p id="isolation-warning" hidden>Browser isolation headers are missing. This deployment may fail to run; check COOP, COEP and CORP in Technical details.</p>
     <div class="peripheral-card">
       <h3>Virtual SD card <span id="sd-state">Ejected</span></h3>
@@ -418,6 +427,16 @@
       <h3>Virtual Smart Cards</h3>
       <div id="card-slots" class="card-tray"></div>
     </div>
+  </section>
+
+  <section id="virtual-host" class="virtual-host" aria-label="Virtual Host" hidden>
+    <h2>Virtual Host</h2>
+    <div class="virtual-host-status" role="status" aria-live="polite">
+      <div>Bridge: <strong id="virtual-host-bridge-status">Stopped</strong></div>
+      <div>Wallet connection: <strong id="virtual-host-wallet-status" class="waiting">Waiting</strong></div>
+    </div>
+    <p>Connects this simulator to a local Specter Virtual Host. The bridge settings page is served only by your computer.</p>
+    <a class="virtual-host-settings" href="http://127.0.0.1:8788/settings" target="_blank" rel="noopener noreferrer">Advanced / Trusted Sites</a>
   </section>
 
   <section class="demo-import" aria-label="Public demo data">
@@ -444,7 +463,7 @@
 </div>
 
 <footer>
-  <p>Experimental Specter DIY browser build &middot; <a href="https://github.com/cryptoadvance/specter-diy">Source on GitHub</a> &middot; <a href="https://github.com/cryptoadvance/specter-virtual-host">Virtual Host</a></p>
+  <p>Experimental Specter DIY browser build &middot; <a href="https://github.com/cryptoadvance/specter-diy">Source on GitHub</a></p>
 </footer>
 
 <script src="./assets/jsQR-1.4.0.js"></script>

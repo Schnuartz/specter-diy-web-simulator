@@ -1,3 +1,5 @@
+import { validateBuildProvenance } from './build-provenance.js';
+
 const $ = selector => document.querySelector(selector);
 const siteRoot = new URL('../', import.meta.url);
 const params = new URLSearchParams(location.search);
@@ -5,7 +7,7 @@ const embedded = params.get('embedded') === '1' && window.parent !== window;
 const gallery = embedded && params.get('gallery') === '1';
 const variant = ['diy', 'play', 'schnuartz'].includes(params.get('variant')) ? params.get('variant') : 'diy';
 const diagnosticQrProbe = params.get('probe') === 'qr' &&
-  ['127.0.0.1', 'localhost', 'try.clavastack.com', 'cryptoadvance.github.io'].includes(location.hostname);
+  ['127.0.0.1', 'localhost', 'try.clavastack.com'].includes(location.hostname);
 if (embedded) document.documentElement.classList.add('embedded');
 if (gallery) document.documentElement.classList.add('gallery');
 const notifyParent = message => { if (embedded) parent.postMessage(message, location.origin); };
@@ -30,6 +32,7 @@ const cameraSelect = $('#camera-select');
 const cameraToggle = $('#camera-toggle');
 const cameraStatusDot = $('#camera-status-dot');
 let worker;
+let workerBlobUrl;
 let softwareContext;
 let softwareFrame;
 let build;
@@ -65,6 +68,11 @@ let startupStartedAt;
 let startupTicker;
 const snapshots = new Map();
 let demoImportBusy = false;
+let virtualHostSocket;
+let virtualHostRetryTimer;
+let virtualHostClientId = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+let virtualHostRunning = false;
+let virtualHostWalletConnected = false;
 
 const startupTimeoutMs = 60000;
 
@@ -82,6 +90,67 @@ function setStatus(message, running = false) {
   status.textContent = message;
   dot.classList.toggle('on', running);
 }
+function updateVirtualHostStatus() {
+  const bridge = $('#virtual-host-bridge-status');
+  const wallet = $('#virtual-host-wallet-status');
+  if (!bridge || !wallet) return;
+  bridge.textContent = virtualHostRunning ? 'Running' : 'Stopped';
+  wallet.textContent = virtualHostWalletConnected ? 'Connected' : 'Waiting';
+  wallet.classList.toggle('waiting', !virtualHostWalletConnected);
+}
+function connectVirtualHost() {
+  if (!$('#virtual-host') || params.get('virtual-host') !== '1' ||
+      virtualHostSocket?.readyState === WebSocket.OPEN || virtualHostSocket?.readyState === WebSocket.CONNECTING) return;
+  const query = `?client=${encodeURIComponent(virtualHostClientId)}`;
+  const localPage = location.hostname === '127.0.0.1' && location.port === '8788';
+  let socket;
+  try {
+    socket = new WebSocket(`${localPage ? `ws://${location.host}` : 'ws://127.0.0.1:8788'}/bridge${query}`);
+  } catch (error) {
+    log(`Virtual Host unavailable: ${error.message}`);
+    clearTimeout(virtualHostRetryTimer);
+    virtualHostRetryTimer = setTimeout(connectVirtualHost, 2000);
+    return;
+  }
+  virtualHostSocket = socket;
+  socket.binaryType = 'arraybuffer';
+  socket.onopen = () => {
+    virtualHostRunning = true;
+    updateVirtualHostStatus();
+  };
+  socket.onmessage = event => {
+    if (typeof event.data === 'string') {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === 'hello') virtualHostWalletConnected = Boolean(message.hostConnected);
+        if (message.type === 'host') virtualHostWalletConnected = Boolean(message.connected);
+        updateVirtualHostStatus();
+      } catch (error) {
+        log(`Virtual Host status error: ${error.message}`);
+      }
+      return;
+    }
+    const bytes = new Uint8Array(event.data);
+    send({ type: 'usb-data', bytes }, [bytes.buffer]);
+    dispatchEvent(new CustomEvent('specter-virtual-host-frame', { detail: bytes }));
+  };
+  socket.onclose = event => {
+    if (virtualHostSocket === socket) virtualHostSocket = undefined;
+    virtualHostRunning = false;
+    virtualHostWalletConnected = false;
+    updateVirtualHostStatus();
+    if (event.code !== 4001 && params.get('virtual-host') === '1') {
+      clearTimeout(virtualHostRetryTimer);
+      virtualHostRetryTimer = setTimeout(connectVirtualHost, 2000);
+    }
+  };
+  socket.onerror = () => { /* onclose updates the status and schedules a retry */ };
+}
+addEventListener('specter-virtual-host-send', event => {
+  if (virtualHostSocket?.readyState !== WebSocket.OPEN) return;
+  const bytes = event.detail;
+  if (bytes instanceof ArrayBuffer || ArrayBuffer.isView(bytes)) virtualHostSocket.send(bytes);
+});
 function clearStartupTimer() {
   if (startupTimer !== undefined) clearTimeout(startupTimer);
   startupTimer = undefined;
@@ -159,6 +228,8 @@ function crashRecover(message, generation = runGeneration) {
   screenCamera.hidden = true;
   worker?.terminate();
   worker = undefined;
+  if (workerBlobUrl) URL.revokeObjectURL(workerBlobUrl);
+  workerBlobUrl = undefined;
   // Invalidate callbacks immediately, including duplicate error/abort events.
   const recoveryGeneration = ++runGeneration;
   if (program === 'wallet' && displayMode === 'OffscreenCanvas' && !forceCanvasBridge) {
@@ -393,6 +464,13 @@ function onWorkerMessage({ data }, generation = runGeneration) {
     send({ type: 'sd-list' });
     send({ type: 'card-list' });
     notifyParent({ type: 'simulator-running', variant });
+  } else if (data.type === 'usb-output') {
+    // The firmware protocol is opaque binary data. Never forward a worker's
+    // text message into the Virtual Host control channel.
+    const bytes = data.bytes;
+    if (virtualHostSocket?.readyState === WebSocket.OPEN &&
+        (bytes instanceof ArrayBuffer || ArrayBuffer.isView(bytes)) &&
+        bytes.byteLength <= (1 << 20)) virtualHostSocket.send(bytes);
   } else if (data.type === 'log') {
     if (/^(SPECTER_|MOCKUI_)/.test(data.message)) startupPhase = data.message;
     if (data.message === 'SPECTER_IMPORTS_DONE' || data.message === 'SPECTER_MAIN_IMPORTED') {
@@ -517,7 +595,13 @@ async function start() {
     if (version) workerUrl.searchParams.set('v', version);
     workerUrl.searchParams.set('worker', workerRevision);
     log(`Starting ${workerUrl.href}; display: ${displayMode}; generation: ${generation}`);
-    worker = new Worker(workerUrl, { name: 'Specter DIY' });
+    // A blob worker inherits this page's CSP. A normal script URL would not,
+    // leaving PR-built firmware glue free to open arbitrary network sockets.
+    const workerResponse = await fetch(workerUrl);
+    if (!workerResponse.ok) throw new Error(`Worker HTTP ${workerResponse.status}`);
+    workerBlobUrl = URL.createObjectURL(new Blob([await workerResponse.text()],
+      { type: 'text/javascript' }));
+    worker = new Worker(workerBlobUrl, { name: 'Specter DIY' });
     worker.onmessage = event => {
       if (generation === runGeneration) onWorkerMessage(event, generation);
     };
@@ -774,6 +858,7 @@ $('#camera-screen-back').onclick = () => { screenCamera.hidden = true; };
 cameraSelect.onchange = () => startCamera(cameraSelect.value);
 addEventListener('pagehide', () => {
   runGeneration++; clearTimeout(recoveryTimer); clearStartupTimer(); stopLoadingClock();
+  clearTimeout(virtualHostRetryTimer); virtualHostSocket?.close();
   stopCamera(); worker?.terminate(); worker = undefined;
 });
 
@@ -857,6 +942,10 @@ function updateBuildMetadata(manifest) {
 }
 
 try {
+  if (params.get('virtual-host') === '1' && !embedded && !gallery) {
+    $('#virtual-host').hidden = false;
+    connectVirtualHost();
+  }
   stateFiles = await awaitPeripherals();
   const pointerPath = variant === 'diy' ? 'browser/current.json' :
     variant === 'play' ? 'browser/variants/specter-playground.json' :
@@ -864,19 +953,13 @@ try {
   const pointer = await (await fetch(new URL(pointerPath, siteRoot), { cache: 'no-store' })).json();
   const buildPath = String(pointer.build || '').replace(/^\/+/, '');
   version = pointer.version;
-  if (!/^builds\/[A-Za-z0-9-]+\/[A-Za-z0-9-]+\/[a-f0-9]{40}\/$/.test(buildPath)) throw new Error('Invalid build pointer');
+  if (!/^builds\/[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?\/[a-f0-9]{40}\/$/.test(buildPath)) throw new Error('Invalid build pointer');
   build = new URL(buildPath, siteRoot).href;
   if (!/^[a-f0-9]{16}$/.test(version)) throw new Error('Invalid artifact version');
   const manifest = await (await fetch(`${build}build-info.json`, { cache: 'no-store' })).json();
   const source = manifest.source || manifest;
   const simulator = manifest.simulator || {};
-  if (!build.includes(source.commit) || manifest.artifact_set_sha256?.slice(0, 16) !== version) {
-    throw new Error('Build manifest mismatch');
-  }
-  const expectedRepos = variant === 'diy' ? ['cryptoadvance/specter-diy', 'schnuartz/specter-diy', 'schnuartz-ai/specter-diy'] :
-    variant === 'play' ? ['k9ert/specter-playground'] : ['schnuartz/specter-playground'];
-  if (!expectedRepos.includes(source.repository?.toLowerCase())) throw new Error('Wrong firmware variant in build manifest');
-  if (!/^[a-f0-9]{40}$/.test(source.commit)) throw new Error('Invalid source commit in build manifest');
+  validateBuildProvenance(buildPath, source, variant, manifest.artifact_set_sha256, version);
   if (manifest.simulator && (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(simulator.repository) ||
       !/^[a-f0-9]{40}$/.test(simulator.commit))) throw new Error('Invalid simulator provenance in build manifest');
   program = manifest.entrypoint === 'mockui' ? 'mockui' : 'wallet';

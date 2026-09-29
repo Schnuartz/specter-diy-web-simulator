@@ -36,7 +36,7 @@ Specter-DIY checkout:
    from this repository's root. The source checkout must be at the exact
    commit you intend to simulate.
 3. Run `python3 web/browser/verify_build.py` and
-   `python3 web/tests/test-publisher.py`.
+   `python3 web/tests/test-source-project.py`.
 4. Run `npm ci --prefix web`, `npx --prefix web playwright install chromium`,
    then `python3 -m http.server 8765 --directory web` in one shell and
    `CI=true npm run test:browser --prefix web` in another. Run
@@ -68,23 +68,32 @@ CPython-only embit examples and tests cannot enter a current browser build.
 
 ## CI and Pages
 
-The existing `Build` workflow now runs native tests, builds Unix and STM32
-firmware, and calls the reusable `.github/workflows/browser-simulator.yml`
-workflow for the browser/QR/SD/Smartcard smoke tests. The caller passes the
-exact source and simulator SHAs; the reusable workflow checks out both and
-overlays only the simulator's `web/` tooling onto the source checkout. This
-keeps the execution context and read-only token in the calling Specter
-repository. The browser and firmware artifacts carry separate `source.json`
+The Specter-DIY `Build` workflow runs native tests, builds Unix and STM32
+firmware, and runs browser/QR/SD/Smartcard smoke tests. It resolves simulator
+`main` once and checks out the exact simulator SHA in every build job before
+running simulator scripts. This keeps the execution context and read-only token
+in the Specter repository. The browser and firmware artifacts carry separate `source.json`
 records, and the browser `build-info.json` carries both provenance records.
 The build workflow has **read-only** repository permissions and no deployment
 secret.
 
-When the tooling is moved to its own repository, the caller only needs to
-change the `uses:` target to a full simulator-workflow SHA and pass that
-repository/SHA as the two simulator inputs. The workflow should remain a
-reusable workflow, not a cross-repository dispatch: the caller's token and
-Pages/PR context then stay in the Specter repository, which keeps fork builds
-usable without PATs or cross-repository write credentials.
+The firmware repository does not call a remote reusable workflow at `main`:
+GitHub could resolve that workflow independently from the simulator SHA in
+build metadata. The privileged publisher implementation lives in the firmware
+repository's protected default branch.
+
+For PRs, the read-only `Build` workflow runs directly on `pull_request` and
+uses the exact PR head repository and SHA from the event. PR source runs only
+in jobs with read-only permissions. A separate job builds Emscripten JavaScript from
+default-branch firmware and trusted simulator tooling. The PR build supplies
+WebAssembly and frozen firmware data. The read-only build replaces the PR
+build's generated JavaScript with its runtime and updates artifact hashes. A
+separate read-only job in the protected publish workflow independently builds
+the trusted runtime; the write-enabled job verifies the browser JavaScript
+against that artifact. HTML, CSS, images, UI logic, worker, peripheral
+implementation, and the experimental warning come from the publisher's
+simulator checkout. Its worker inherits a CSP allowing same-site assets and
+the local Virtual Host on port 8788 while blocking other outbound connections.
 
 A separate `Publish browser simulator` workflow runs from the trusted default
 branch after `Build` completes. It verifies that the browser manifest, its
@@ -94,14 +103,20 @@ default-branch build updates the stable Pages root; a passing PR build updates
 `/pr/<number>/` and a single PR comment with links to the simulator, firmware
 artifact, and build log. A failed current PR build removes its stale preview
 and replaces that one comment with a failure notice, even when it uploaded no
-artifacts. Missing or invalid artifacts from a nominally successful run also
-invalidate its current PR preview. The failure path identifies the PR from the
-trusted `workflow_run` event and GitHub's pull-request API; the untrusted
-`build-target` artifact is cross-checked only for successful runs. A run
+artifacts. The PR is identified from the trusted `workflow_run` event and
+checked against the current pull-request API record. A run
 superseded by a newer PR commit cannot replace the current preview. The
 publisher keeps an
 `gh-pages` branch as static state and uses `actions/deploy-pages` to deploy the
 complete tree. PRs receive no write token or deployment credentials.
+
+Deploy the simulator changes to its trusted `main` branch before enabling the
+new firmware workflow on the firmware default branch. Remove legacy PR
+previews from `gh-pages` once, then rebuild open PRs so old published shells
+cannot remain reachable. GitHub Pages must use **GitHub Actions** as its
+deployment source. A PR with new C imports may require a compatible trusted
+Emscripten runtime update before its WebAssembly can run; the browser smoke
+tests must pass with the combined artifacts.
 
 ### Rebuild an older open PR without a commit
 
