@@ -2,12 +2,13 @@
 
 Browser simulator tooling for Specter DIY. It provides the WebAssembly build,
 simulated smartcard/SD-card/USB runtime, browser shell, provenance checks,
-tests, and the reusable GitHub Actions workflows used by
+and tests used by
 [`cryptoadvance/specter-diy`](https://github.com/cryptoadvance/specter-diy).
 
-The firmware repository calls the reusable workflows on simulator `main` and
-resolves its current commit for each run. The exact Specter source and simulator
-commits are recorded in every browser build for provenance.
+The firmware repository resolves simulator `main` once per build, checks out
+that exact commit in its read-only build jobs, and runs the simulator scripts
+from that checkout. The exact Specter source and simulator commits are recorded
+in every browser build for provenance.
 
 See [the simulator workflow and release notes](docs/browser-simulator.md) for
 the repository contract and migration details.

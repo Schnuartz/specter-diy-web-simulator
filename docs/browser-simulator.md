@@ -68,31 +68,29 @@ CPython-only embit examples and tests cannot enter a current browser build.
 
 ## CI and Pages
 
-The existing `Build` workflow now runs native tests, builds Unix and STM32
-firmware, and calls the reusable `.github/workflows/browser-simulator.yml`
-workflow for the browser/QR/SD/Smartcard smoke tests. The caller passes the
-exact source and simulator SHAs; the reusable workflow checks out both and
-overlays only the simulator's `web/` tooling onto the source checkout. This
-keeps the execution context and read-only token in the calling Specter
-repository. The browser and firmware artifacts carry separate `source.json`
+The Specter-DIY `Build` workflow runs native tests, builds Unix and STM32
+firmware, and runs browser/QR/SD/Smartcard smoke tests. It resolves simulator
+`main` once and checks out the exact simulator SHA in every build job before
+running simulator scripts. This keeps the execution context and read-only token
+in the Specter repository. The browser and firmware artifacts carry separate `source.json`
 records, and the browser `build-info.json` carries both provenance records.
 The build workflow has **read-only** repository permissions and no deployment
 secret.
 
-The firmware repository calls the reusable browser workflow from simulator
-`main`, resolves its current SHA once, and uses that SHA for all simulator
-tooling checkouts. The privileged publisher implementation lives in the
-firmware repository's protected default branch. The workflow remains reusable
-so the caller retains its token and Pages context.
+The firmware repository does not call a remote reusable workflow at `main`:
+GitHub could resolve that workflow independently from the simulator SHA in
+build metadata. The privileged publisher implementation lives in the firmware
+repository's protected default branch.
 
 For PRs, the read-only `Build` workflow runs directly on `pull_request` and
 uses the exact PR head repository and SHA from the event. PR source runs only
 in jobs with read-only permissions. A separate job builds Emscripten JavaScript from
 default-branch firmware and trusted simulator tooling. The PR build supplies
 WebAssembly and frozen firmware data. The read-only build replaces the PR
-build's generated JavaScript with its trusted runtime and updates artifact
-hashes. The publisher verifies this runtime against the separate runtime
-artifact. HTML, CSS, images, UI logic, worker, peripheral
+build's generated JavaScript with its runtime and updates artifact hashes. A
+separate read-only job in the protected publish workflow independently builds
+the trusted runtime; the write-enabled job verifies the browser JavaScript
+against that artifact. HTML, CSS, images, UI logic, worker, peripheral
 implementation, and the experimental warning come from the publisher's
 simulator checkout. Its worker inherits a CSP allowing same-site assets and
 the local Virtual Host on port 8788 while blocking other outbound connections.
