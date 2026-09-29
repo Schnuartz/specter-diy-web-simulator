@@ -121,8 +121,10 @@ jobs:
         run: python3 web/browser/verify_build.py
       - name: Test preview provenance and publication rules
         run: |
+          npm run test:provenance --prefix web
           python3 web/tests/test-direct-publisher.py
           python3 web/tests/test-trust-boundary.py
+          python3 web/tests/test-source-project.py
           python3 web/tests/test-trigger-pr.py
           python3 web/tests/test-resolve-build-target.py
           python3 web/tests/test-usb-vcp.py

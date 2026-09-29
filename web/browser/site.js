@@ -1,3 +1,5 @@
+import { validateBuildProvenance } from './build-provenance.js';
+
 const $ = selector => document.querySelector(selector);
 const siteRoot = new URL('../', import.meta.url);
 const params = new URLSearchParams(location.search);
@@ -951,19 +953,13 @@ try {
   const pointer = await (await fetch(new URL(pointerPath, siteRoot), { cache: 'no-store' })).json();
   const buildPath = String(pointer.build || '').replace(/^\/+/, '');
   version = pointer.version;
-  if (!/^builds\/[A-Za-z0-9-]+\/[A-Za-z0-9-]+\/[a-f0-9]{40}\/$/.test(buildPath)) throw new Error('Invalid build pointer');
+  if (!/^builds\/[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?\/[a-f0-9]{40}\/$/.test(buildPath)) throw new Error('Invalid build pointer');
   build = new URL(buildPath, siteRoot).href;
   if (!/^[a-f0-9]{16}$/.test(version)) throw new Error('Invalid artifact version');
   const manifest = await (await fetch(`${build}build-info.json`, { cache: 'no-store' })).json();
   const source = manifest.source || manifest;
   const simulator = manifest.simulator || {};
-  if (!build.includes(source.commit) || manifest.artifact_set_sha256?.slice(0, 16) !== version) {
-    throw new Error('Build manifest mismatch');
-  }
-  const expectedRepos = variant === 'diy' ? ['schnuartz/specter-diy', 'schnuartz-ai/specter-diy'] :
-    variant === 'play' ? ['k9ert/specter-playground'] : ['schnuartz/specter-playground'];
-  if (!expectedRepos.includes(source.repository?.toLowerCase())) throw new Error('Wrong firmware variant in build manifest');
-  if (!/^[a-f0-9]{40}$/.test(source.commit)) throw new Error('Invalid source commit in build manifest');
+  validateBuildProvenance(buildPath, source, variant, manifest.artifact_set_sha256, version);
   if (manifest.simulator && (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(simulator.repository) ||
       !/^[a-f0-9]{40}$/.test(simulator.commit))) throw new Error('Invalid simulator provenance in build manifest');
   program = manifest.entrypoint === 'mockui' ? 'mockui' : 'wallet';
