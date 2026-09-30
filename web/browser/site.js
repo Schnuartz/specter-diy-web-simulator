@@ -135,8 +135,9 @@ function connectVirtualHost() {
       return;
     }
     const bytes = new Uint8Array(event.data);
+    const testFrame = bytes.slice();
     send({ type: 'usb-data', bytes }, [bytes.buffer]);
-    dispatchEvent(new CustomEvent('specter-virtual-host-frame', { detail: bytes }));
+    dispatchEvent(new CustomEvent('specter-virtual-host-frame', { detail: testFrame }));
   };
   socket.onclose = event => {
     if (virtualHostSocket === socket) virtualHostSocket = undefined;
