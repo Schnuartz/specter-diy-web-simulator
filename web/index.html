@@ -228,6 +228,9 @@
       cursor: pointer; margin: 3px 3px 3px 0; min-height: 36px;
     }
     .sim-panel button:hover { border-color: var(--specter-primary); }
+    .sd-actions { display:flex; align-items:stretch; flex-wrap:wrap; gap:6px; margin:4px 0 8px; }
+    .sim-panel .sd-actions button, .sim-panel .sd-actions select { margin:0; }
+    .sd-actions #demo-network { flex:1 1 150px; min-width:135px; }
     .sim-panel a { color: var(--specter-primary); }
     .sim-panel details { margin-top: 10px; }
     .sim-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; max-height: 180px; overflow: auto; }
@@ -242,8 +245,6 @@
     .demo-import p { margin:5px 0; }
     .demo-import strong { color:var(--specter-light); }
     .demo-import button { background:var(--specter-dark-accent); color:var(--specter-light); border:1px solid #536174; border-radius:6px; padding:8px; cursor:pointer; min-height:36px; }
-    .demo-import #demo-load { width:auto; background:var(--specter-dark-accent); border-color:#536174; font-weight:700; }
-    .demo-import #demo-load:hover { border-color:var(--specter-primary); }
     .demo-import details { margin-top:8px; color:var(--specter-light-secondary); }
     .demo-import summary { cursor:pointer; font-size:11px; }
     #sd-drop { border: 1px dashed #536174; border-radius: 8px; padding: 10px; margin-top: 7px; }
@@ -322,12 +323,12 @@
     .gallery .virtual-host { display:none; }
     .gallery #screen-overlay { left:0; top:0; width:100%; height:100%; border-radius:0; }
     @media (min-width:900px) {
-      .page { display:grid; grid-template-columns:380px 380px; grid-template-areas:'warning warning' 'device peripherals' 'restart peripherals' 'virtual-host virtual-host' 'hardware hardware' 'demo demo' 'technical technical'; gap:16px 22px; width:100%; max-width:822px; margin:auto; align-items:start; }
+      .page { display:grid; grid-template-columns:minmax(380px, 480px) minmax(420px, 1fr); grid-template-areas:'warning warning' 'device peripherals' 'restart peripherals' 'virtual-host virtual-host' 'hardware hardware' 'demo demo' 'technical technical'; gap:16px 22px; width:100%; max-width:1180px; margin:auto; align-items:start; }
       .warning { grid-area:warning; max-width:280px; justify-self:center; }
       .phone-wrapper { grid-area:device; }
       .device-actions { grid-area:restart; }
       .virtual-host { grid-area:virtual-host; }
-      .sim-panel { grid-area:peripherals; }
+      .sim-panel { grid-area:peripherals; max-width:none; }
       .hardware-link { grid-area:hardware; justify-self:center; margin-top:16px; }
       .demo-import { grid-area:demo; justify-self:center; }
       .technical-details { grid-area:technical; justify-self:center; }
@@ -411,8 +412,15 @@
     <div class="peripheral-card">
       <h3>Virtual SD card <span id="sd-state">Ejected</span></h3>
       <div id="sd-stage" class="sd-stage"><div class="sd-card-control"><button id="sd-toggle" type="button" aria-label="Insert SD card" aria-pressed="false" title="Click to insert SD card"><img class="sd-card-graphic" src="./assets/sd-card-8gb.png" alt="microSD card"></button><small id="sd-hint">Click to insert</small></div></div>
-      <button id="sd-add">Add files</button>
-      <button id="sd-clear">Clear card</button>
+      <div class="sd-actions" aria-label="SD card actions">
+        <button id="sd-add">Add files</button>
+        <button id="sd-clear">Clear card</button>
+        <select id="demo-network" aria-label="Import demo data" title="Choose a demo set. Mainnet uses public demo seeds and fictional transactions. Never send or store real funds.">
+          <option value="" selected>None</option>
+          <option value="testnet">Testnet Demos/Seed</option>
+          <option value="mainnet">Mainnet/Demos Seed</option>
+        </select>
+      </div>
       <input id="sd-picker" type="file" multiple hidden>
       <div id="sd-drop">Drop or paste multiple files here, or use Add files.</div>
       <ul id="sd-files"></ul>
@@ -440,10 +448,9 @@
   </section>
 
   <section class="demo-import" aria-label="Public demo data">
-    <button id="demo-load" type="button">Import Demo Data</button>
     <details>
       <summary>What gets imported?</summary>
-      <p><strong>Unsafe public test seeds only.</strong> Ghost, Zoo, their BIP85 children, two single-signature PSBT examples, one completely unsigned Ghost + Zoo + Mirror 2-of-3 PSBT and the matching multisig wallet. Two blank virtual Smartcards receive Ghost (PIN 1234) and Zoo (PIN 21). Mirror's seed is never stored.</p>
+      <p><strong>Unsafe public demo seeds only.</strong> Choose a network beside the SD-card controls to load its wallet descriptors, demo transactions and seed files. The SD card is inserted automatically. Two virtual Smartcards receive the Ghost and Zoo demo seeds without being inserted. Selecting None removes the demo files and resets the demo Smartcards.</p>
     </details>
   </section>
 

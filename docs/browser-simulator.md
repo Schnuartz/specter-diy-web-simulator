@@ -24,6 +24,15 @@ HTTPS or localhost and browser permission. Some browser versions need the
 local Unix simulator; physical-device camera, secure element, air-gap,
 STM32 timing, battery, and physical card properties are not simulated.
 
+The SD-card panel starts with its demo-set selector at **None**, beside **Add
+files** and **Clear card**. Selecting Testnet or Mainnet replaces the previous
+demo files and loads that network's public seed examples and transactions. The
+SD card is inserted automatically when the demo needs it; Smartcards are never
+inserted automatically. Returning to **None** removes demo files and restores
+the previous simulated Smartcard contents and peripheral insertion state.
+Unrelated files on the SD card remain in place, and this selection is not saved
+across reloads.
+
 ## Build locally
 
 From Linux or WSL with this repository checked out next to a recursive
