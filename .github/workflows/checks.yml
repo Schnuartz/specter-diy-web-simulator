@@ -1,4 +1,4 @@
-name: Simulator checks
+name: Simulator tooling checks
 
 on:
   pull_request:
@@ -9,23 +9,30 @@ permissions:
 
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: '22'
+          node-version: '22.20.0'
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: '3.11'
-      - name: Check Python syntax
-        run: python3 -m compileall -q web/browser web/tools web/tests
-      - name: Install JavaScript dependencies
+          python-version: '3.11.9'
+      - name: Check Python syntax and workflow contracts
+        run: |
+          python3 -m compileall -q web/browser web/tools web/tests
+          python3 web/tests/test-workflow-contract.py
+      - name: Install locked JavaScript dependencies
         run: npm ci --prefix web
-      - name: Run simulator unit tests
+      - name: Run simulator tooling tests
         run: |
           python3 web/tests/test-resolve-build-target.py
-          python3 web/tests/test-trigger-pr.py
+          python3 web/tests/test-package-preview.py
+          python3 web/tests/test-source-project.py
+          python3 web/tests/test-usb-vcp.py
+          node web/tests/test-build-provenance.mjs
           node web/tests/test-demo-data.mjs

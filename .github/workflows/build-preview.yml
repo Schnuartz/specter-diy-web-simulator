@@ -1,0 +1,253 @@
+name: Build browser simulator preview
+
+on:
+  workflow_call:
+
+# A called workflow cannot widen the caller's token permissions.
+permissions:
+  contents: read
+
+jobs:
+  target:
+    name: Resolve caller source and workflow identity
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      repository: ${{ steps.resolve.outputs.repository }}
+      commit: ${{ steps.resolve.outputs.commit }}
+      number: ${{ steps.resolve.outputs.number }}
+      branch: ${{ steps.resolve.outputs.branch }}
+      simulator_repository: ${{ steps.resolve.outputs.simulator_repository }}
+      simulator_commit: ${{ steps.resolve.outputs.simulator_commit }}
+    steps:
+      # job.workflow_* identifies this exact reusable workflow commit.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: simulator-tools
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11.9'
+      - name: Resolve the exact source from the caller event
+        id: resolve
+        env:
+          SOURCE_EVENT: ${{ github.event_name }}
+          SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SOURCE_PR_NUMBER: ${{ github.event.pull_request.number || 0 }}
+          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          SOURCE_BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name || github.repository }}
+          SOURCE_BASE_BRANCH: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
+          SOURCE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SIMULATOR_REPOSITORY: ${{ job.workflow_repository }}
+          SIMULATOR_SHA: ${{ job.workflow_sha }}
+        run: python3 simulator-tools/web/tools/resolve_build_target.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: browser-target
+          path: target.json
+          if-no-files-found: error
+          retention-days: 14
+
+  trusted-runtime:
+    name: Build JavaScript glue from the caller's base source
+    needs: target
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: specter-diy
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: simulator-tools
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: emscripten-core/emsdk
+          ref: 3d6d8ee910466516a53e665b86458faa81dae9ba
+          path: .browser-work/emsdk
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11.9'
+      - name: Install Emscripten 3.1.74
+        run: |
+          .browser-work/emsdk/emsdk install 3.1.74
+          .browser-work/emsdk/emsdk activate 3.1.74
+      - name: Build trusted JavaScript runtime from the caller base
+        env:
+          SPECTER_SRC: ${{ github.workspace }}/specter-diy
+          SPECTER_SOURCE_REPOSITORY: ${{ github.repository }}
+          EXPECTED_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          SIMULATOR_REPOSITORY: ${{ job.workflow_repository }}
+          SIMULATOR_COMMIT: ${{ job.workflow_sha }}
+        run: |
+          source .browser-work/emsdk/emsdk_env.sh
+          bash simulator-tools/web/browser/build-browser.sh
+          mkdir -p trusted-runtime
+          cp "simulator-tools/web/builds/$SPECTER_SOURCE_REPOSITORY/$EXPECTED_SHA/micropython.js" trusted-runtime/micropython.js
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: trusted-browser-runtime
+          path: trusted-runtime/micropython.js
+          if-no-files-found: error
+          retention-days: 14
+
+  build-preview:
+    name: Build, test, and package the caller's exact source
+    needs: [target, trusted-runtime]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ needs.target.outputs.repository }}
+          ref: ${{ needs.target.outputs.commit }}
+          path: specter-diy
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: simulator-tools
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: emscripten-core/emsdk
+          ref: 3d6d8ee910466516a53e665b86458faa81dae9ba
+          path: .browser-work/emsdk
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: cryptoadvance/specter-virtual-host
+          ref: 3cf3ecd58a97da0f2cc4b7586ca33abf02f68372
+          path: virtual-host
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.20.0'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11.9'
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.25.5'
+          cache-dependency-path: virtual-host/go.sum
+      - name: Install Virtual Host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+      - name: Install Emscripten 3.1.74
+        run: |
+          .browser-work/emsdk/emsdk install 3.1.74
+          .browser-work/emsdk/emsdk activate 3.1.74
+      - name: Build browser simulator from the exact source SHA
+        env:
+          SPECTER_SRC: ${{ github.workspace }}/specter-diy
+          EXPECTED_SHA: ${{ needs.target.outputs.commit }}
+          SPECTER_SOURCE_REPOSITORY: ${{ needs.target.outputs.repository }}
+          SIMULATOR_REPOSITORY: ${{ needs.target.outputs.simulator_repository }}
+          SIMULATOR_COMMIT: ${{ needs.target.outputs.simulator_commit }}
+        run: |
+          source .browser-work/emsdk/emsdk_env.sh
+          bash simulator-tools/web/browser/build-browser.sh
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: trusted-browser-runtime
+          path: trusted-runtime
+      - name: Replace generated glue with caller-base runtime
+        run: python3 simulator-tools/web/browser/replace_glue.py simulator-tools/web trusted-runtime/micropython.js
+      - name: Verify source, simulator, and artifact hashes
+        env:
+          EXPECTED_SHA: ${{ needs.target.outputs.commit }}
+          SPECTER_SOURCE_REPOSITORY: ${{ needs.target.outputs.repository }}
+          SIMULATOR_REPOSITORY: ${{ needs.target.outputs.simulator_repository }}
+          SIMULATOR_COMMIT: ${{ needs.target.outputs.simulator_commit }}
+        run: python3 simulator-tools/web/browser/verify_build.py
+      - name: Build the pinned Virtual Host bridge
+        run: go build -trimpath -tags webkit2_41 -o "$RUNNER_TEMP/specter-virtual-host" .
+        working-directory: virtual-host
+      - name: Install browser dependencies and run simulator unit tests
+        run: |
+          npm ci --prefix simulator-tools/web
+          npx --prefix simulator-tools/web playwright install --with-deps chromium
+          python3 -m compileall -q simulator-tools/web/browser simulator-tools/web/tools simulator-tools/web/tests
+          python3 simulator-tools/web/tests/test-browser-manifest.py "$GITHUB_WORKSPACE/specter-diy"
+          python3 simulator-tools/web/tests/test-resolve-build-target.py
+          python3 simulator-tools/web/tests/test-package-preview.py
+          python3 simulator-tools/web/tests/test-source-project.py
+          python3 simulator-tools/web/tests/test-usb-vcp.py
+          node simulator-tools/web/tests/test-build-provenance.mjs
+          node simulator-tools/web/tests/test-demo-data.mjs
+      - name: Start local browser server and pinned Virtual Host
+        env:
+          SPECTER_VIRTUAL_HOST_CONFIG: ${{ runner.temp }}/specter-virtual-host.json
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8765 --directory simulator-tools/web > "$RUNNER_TEMP/browser.log" 2>&1 &
+          http_pid=$!
+          "$RUNNER_TEMP/specter-virtual-host" serve --headless --site http://127.0.0.1:8765 --config "$SPECTER_VIRTUAL_HOST_CONFIG" > "$RUNNER_TEMP/virtual-host.log" 2>&1 &
+          virtual_host_pid=$!
+          cleanup() {
+            kill "$virtual_host_pid" "$http_pid" 2>/dev/null || true
+            wait "$virtual_host_pid" "$http_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          ready=false
+          for _ in $(seq 1 120); do
+            if curl --fail --silent http://127.0.0.1:8765/ > /dev/null && \
+               curl --fail --silent http://127.0.0.1:8788/virtual-host-health > /dev/null; then
+              ready=true
+              break
+            fi
+            sleep 0.25
+          done
+          test "$ready" = true
+          CI=true npm run test:browser --prefix simulator-tools/web
+          node simulator-tools/web/tests/test-network-policy.mjs
+          node simulator-tools/web/tests/test-usb-transport.mjs
+      - name: Package the exact browser payload and provenance
+        env:
+          SOURCE_REPOSITORY: ${{ needs.target.outputs.repository }}
+          SOURCE_SHA: ${{ needs.target.outputs.commit }}
+          PR_NUMBER: ${{ needs.target.outputs.number }}
+          SIMULATOR_REPOSITORY: ${{ needs.target.outputs.simulator_repository }}
+          SIMULATOR_SHA: ${{ needs.target.outputs.simulator_commit }}
+        run: |
+          python3 simulator-tools/web/tools/package_preview.py simulator-tools/web specter-diy browser-preview \
+            "$SOURCE_REPOSITORY" "$SOURCE_SHA" "$PR_NUMBER" "$SIMULATOR_REPOSITORY" "$SIMULATOR_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: browser-preview
+          path: browser-preview
+          if-no-files-found: error
+          retention-days: 14
+      - name: Summarize the exact source build
+        env:
+          SOURCE_REPOSITORY: ${{ needs.target.outputs.repository }}
+          SOURCE_SHA: ${{ needs.target.outputs.commit }}
+          SIMULATOR_SHA: ${{ needs.target.outputs.simulator_commit }}
+        run: |
+          {
+            echo '## Browser simulator build'
+            echo "- Specter source: \`$SOURCE_REPOSITORY@$SOURCE_SHA\`"
+            echo "- Web Simulator workflow: \`cryptoadvance/specter-diy-web-simulator@$SIMULATOR_SHA\`"
+            echo '- Build permissions: contents: read'
+          } >> "$GITHUB_STEP_SUMMARY"

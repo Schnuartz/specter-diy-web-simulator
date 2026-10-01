@@ -1,76 +1,83 @@
 #!/usr/bin/env python3
-"""Resolve a Build run to one source commit before any build job starts."""
-from urllib.request import Request, urlopen
+"""Resolve only identity supplied by the caller's GitHub event."""
+from __future__ import annotations
+
 import json
 import os
 import re
+from pathlib import Path
+
+REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\Z")
+COMMIT = re.compile(r"[a-f0-9]{40}\Z")
 
 
-def fetch_pull(repository: str, number: str, token: str) -> dict:
-    request = Request(f"https://api.github.com/repos/{repository}/pulls/{number}", headers={
-        "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-    })
-    with urlopen(request, timeout=30) as response:
-        return json.load(response)
+def resolve(env: dict[str, str]) -> dict:
+    event = env["SOURCE_EVENT"]
+    caller = env["GITHUB_REPOSITORY"]
+    default_branch = env["SOURCE_DEFAULT_BRANCH"]
+    base_repository = env["SOURCE_BASE_REPOSITORY"]
+    base_branch = env["SOURCE_BASE_BRANCH"]
+    repository = env["SOURCE_REPOSITORY"]
+    commit = env["SOURCE_SHA"]
+    branch = env["SOURCE_BRANCH"]
+    number_text = env["SOURCE_PR_NUMBER"].strip()
 
-
-def resolve(env, fetch=fetch_pull) -> dict:
-    event = env["TARGET_EVENT"]
-    number = str(env["TARGET_PR"]).strip(" \t")
-    sha = env["TARGET_SHA"].strip(" \t")
-    branch = env["TARGET_BRANCH"]
-    repository = env["TARGET_REPOSITORY"]
-    if event == "workflow_dispatch":
-        if not re.fullmatch(r"[a-f0-9]{7,40}", sha):
-            raise ValueError("Expected a 7- to 40-character hexadecimal PR head SHA")
-        if env["GITHUB_REF"] != f"refs/heads/{env['TARGET_DEFAULT_BRANCH']}":
-            raise ValueError("Manual PR builds must run from the default branch")
-        if not re.fullmatch(r"[1-9][0-9]{0,6}", number):
-            raise ValueError("Invalid PR number")
-        pr = fetch(env["GITHUB_REPOSITORY"], number, env["GH_TOKEN"])
-        current_sha = pr["head"]["sha"]
-        if pr["state"] != "open":
-            raise ValueError(f"PR #{number} is not open")
-        if not isinstance(current_sha, str) or not re.fullmatch(r"[a-f0-9]{40}", current_sha):
-            raise ValueError(f"PR #{number} has no valid head SHA")
-        if not current_sha.startswith(sha):
-            raise ValueError(f"PR #{number} currently points to {current_sha[:12]}, not {sha}")
-        if (pr["base"]["repo"]["full_name"].lower() != env["GITHUB_REPOSITORY"].lower() or
-                pr["base"]["ref"] != env["TARGET_DEFAULT_BRANCH"]):
-            raise ValueError("PR targets another repository or branch")
-        sha = current_sha
-        repository = pr["head"]["repo"]["full_name"]
-        branch = pr["head"]["ref"]
-    elif event == "pull_request":
-        number = int(number)
+    if event == "pull_request":
+        if not re.fullmatch(r"[1-9][0-9]{0,6}", number_text):
+            raise ValueError("Invalid pull request number")
+        number = int(number_text)
+        if base_repository.lower() != caller.lower() or base_branch != default_branch:
+            raise ValueError("Pull request does not target this repository's default branch")
     elif event == "push":
+        valid_push = (
+            number_text == "0"
+            and base_repository.lower() == caller.lower()
+            and base_branch == default_branch
+            and branch == default_branch
+            and env["GITHUB_REF"] == f"refs/heads/{default_branch}"
+            and repository.lower() == caller.lower()
+        )
+        if not valid_push:
+            raise ValueError("Push is not for this repository's default branch")
         number = 0
     else:
-        raise ValueError("Unsupported Build event")
-    if not re.fullmatch(r"[a-f0-9]{40}", sha):
-        raise ValueError("Expected a full source commit SHA")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
-        raise ValueError("Invalid source repository")
-    simulator_repository = env["TARGET_SIMULATOR_REPOSITORY"]
-    simulator_commit = env["TARGET_SIMULATOR_COMMIT"].strip(" \t")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", simulator_repository):
-        raise ValueError("Invalid simulator repository")
-    if not re.fullmatch(r"[a-f0-9]{40}", simulator_commit):
-        raise ValueError("Expected a full simulator commit SHA")
-    return {"event": event, "number": int(number), "branch": branch,
-            "commit": sha, "repository": repository,
-            "simulator_repository": simulator_repository,
-            "simulator_commit": simulator_commit}
+        raise ValueError("Unsupported caller event")
+
+    simulator_repository = env["SIMULATOR_REPOSITORY"]
+    simulator_sha = env["SIMULATOR_SHA"]
+    run_id_text = env["GITHUB_RUN_ID"]
+    run_attempt_text = env["GITHUB_RUN_ATTEMPT"]
+    if not re.fullmatch(r"[1-9][0-9]{0,19}", run_id_text) or \
+            not re.fullmatch(r"[1-9][0-9]{0,5}", run_attempt_text):
+        raise ValueError("Invalid workflow run identity")
+    if not REPOSITORY.fullmatch(repository) or not COMMIT.fullmatch(commit) or not branch:
+        raise ValueError("Invalid source repository or commit identity")
+    if simulator_repository != "cryptoadvance/specter-diy-web-simulator" or not COMMIT.fullmatch(simulator_sha):
+        raise ValueError("Invalid reusable workflow identity")
+
+    return {
+        "event": event,
+        "number": number,
+        "branch": branch,
+        "repository": repository,
+        "commit": commit,
+        "base_repository": base_repository,
+        "base_branch": base_branch,
+        "simulator_repository": simulator_repository,
+        "simulator_commit": simulator_sha,
+        "workflow_run_id": int(run_id_text),
+        "workflow_run_attempt": int(run_attempt_text),
+    }
 
 
-def main():
+def main() -> None:
     target = resolve(os.environ)
-    with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-        output.write(f"sha={target['commit']}\nrepository={target['repository']}\n"
-                     f"simulator_repository={target['simulator_repository']}\n"
-                     f"simulator_commit={target['simulator_commit']}\n")
-    with open("target.json", "w") as output:
-        json.dump(target, output)
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+        for key in ("repository", "commit", "number", "branch", "base_repository",
+                    "base_branch", "simulator_repository", "simulator_commit",
+                    "workflow_run_id", "workflow_run_attempt"):
+            output.write(f"{key}={target[key]}\n")
+    Path("target.json").write_text(json.dumps(target, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

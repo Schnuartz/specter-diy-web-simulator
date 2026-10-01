@@ -1,171 +1,212 @@
-# Browser simulator and PR previews
+# Browser simulator
 
-The browser simulator runs the **actual** Specter DIY `src/` application under
-the fork's MicroPython Unix port, compiled with Emscripten 3.1.74. LVGL draws
-the display in a Web Worker. The website presents that framebuffer inside the
-physical device image and forwards pointer coordinates to LVGL. Browser shims
-replace only device transport: `/state/sd` via `platform.SDCard`, scanner data
-via `pyb.UART('YA')`, and MemoryCard APDUs via `uscard.Reader`.
+## Getting Started
 
-```text
-Browser page → Worker → MicroPython/WASM → Specter Python → LVGL → Canvas
-                              ↑                   ↑
-                      virtual SD/card       QR scanner seam
-```
+The browser simulator freezes and runs the **real Specter DIY Python
+application** from `specter-diy/src` inside MicroPython compiled to WebAssembly.
+It is not a second implementation of Specter wallet logic. Browser-only
+transport shims model the device interfaces; wallet logic remains in Specter
+DIY.
 
-**Experimental development build. Never enter a real seed phrase or use real
-funds.** The browser and any automatically built firmware lack the security
-assurances of an official release. Use test seeds and dedicated test hardware.
-Imported SD files, scanned QR payloads, and virtual card data stay in the tab;
-the shell fetches static assets only. Runtime sockets and SSL are disabled.
-Reloading discards simulated state. Normal restart retains simulated flash and
-peripheral files; factory reset wipes flash separately. The webcam requires
-HTTPS or localhost and browser permission. Some browser versions need the
-local Unix simulator; physical-device camera, secure element, air-gap,
-STM32 timing, battery, and physical card properties are not simulated.
+Supported development environment: Ubuntu 24.04 or WSL 2 with Ubuntu 24.04.
+The required versions used by blocking CI are:
 
-The SD-card panel starts with its demo-set selector at **None**, beside **Add
-files** and **Clear card**. Selecting Testnet or Mainnet replaces the previous
-demo files and loads that network's public seed examples and transactions. The
-SD card is inserted automatically when the demo needs it; Smartcards are never
-inserted automatically. Returning to **None** removes demo files and restores
-the previous simulated Smartcard contents and peripheral insertion state.
-Unrelated files on the SD card remain in place, and this selection is not saved
-across reloads.
+- Emscripten SDK **3.1.74**, bootstrapped from `emscripten-core/emsdk`
+  commit `3d6d8ee910466516a53e665b86458faa81dae9ba`.
+- Node.js **22.20.0**.
+- The Emscripten SDK itself carries its pinned Node.js runtime for compiler
+  tools; Node.js 22.20.0 runs the locked JavaScript and Playwright tests.
+- Python **3.11.9**.
+- Go **1.25.5** for the Virtual Host smoke test.
+- Chromium from the Playwright version locked in `web/package-lock.json`.
+- Specter DIY's recursive submodules at the selected source commit.
 
-## Build locally
-
-From Linux or WSL with this repository checked out next to a recursive
-Specter-DIY checkout:
-
-1. Install and activate [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html)
-   **3.1.74** (`emcc --version` must report it), plus the native build
-   dependencies required by the Specter-DIY source checkout.
-2. Run `SPECTER_SRC=/path/to/specter-diy bash web/browser/build-browser.sh`
-   from this repository's root. The source checkout must be at the exact
-   commit you intend to simulate.
-3. Run `python3 web/browser/verify_build.py` and
-   `python3 web/tests/test-source-project.py`.
-4. Run `npm ci --prefix web`, `npx --prefix web playwright install chromium`,
-   then `python3 -m http.server 8765 --directory web` in one shell and
-   `CI=true npm run test:browser --prefix web` in another. Run
-   `npm run test:compat --prefix web` after installing Firefox and WebKit with
-   Playwright for additional engine coverage.
-
-The build output is `web/builds/<owner>/<repo>/<source-sha>/` with
-`micropython.js`, `.wasm`, `.data`, and `build-info.json`. The manifest records
-two immutable inputs: `source.repository`/`source.commit` identify the
-Specter-DIY code being simulated, while `simulator.repository`/
-`simulator.commit` identify the simulator tooling that built it. It also
-records the Emscripten version, build time, and SHA256 of each artifact.
-`web/browser/current.json` remains only a pointer to the build. Both generated
-directories are ignored by Git. `SPECTER_SOURCE_REPOSITORY=owner/repo`,
-`SIMULATOR_REPOSITORY=owner/repo`, and `SIMULATOR_COMMIT=<full-sha>` can be
-used when building source and tooling from different repositories.
-
-The build script applies only browser compatibility changes to the checked-out
-MicroPython/LVGL C submodules. It freezes the wallet's `src/` tree without
-changing wallet screens or logic. Browser-specific Python, JS, and source
-patching stay under `web/browser/`. The existing Unix simulator and hardware
-firmware build remain separate.
-
-For newer board revisions, the browser freeze uses the board's curated
-`f469-disco/manifests/common.py`, including embit from its `src/` package path.
-Older revisions without that manifest retain the original flat-library freeze.
-The build checks the resulting module list before compiling WebAssembly, so
-CPython-only embit examples and tests cannot enter a current browser build.
-
-## CI and Pages
-
-The Specter-DIY `Build` workflow runs native tests, builds Unix and STM32
-firmware, and runs browser/QR/SD/Smartcard smoke tests. It resolves simulator
-`main` once and checks out the exact simulator SHA in every build job before
-running simulator scripts. This keeps the execution context and read-only token
-in the Specter repository. The browser and firmware artifacts carry separate `source.json`
-records, and the browser `build-info.json` carries both provenance records.
-The build workflow has **read-only** repository permissions and no deployment
-secret.
-
-The firmware repository does not call a remote reusable workflow at `main`:
-GitHub could resolve that workflow independently from the simulator SHA in
-build metadata. The privileged publisher implementation lives in the firmware
-repository's protected default branch.
-
-For PRs, the read-only `Build` workflow runs directly on `pull_request` and
-uses the exact PR head repository and SHA from the event. PR source runs only
-in jobs with read-only permissions. A separate job builds Emscripten JavaScript from
-default-branch firmware and trusted simulator tooling. The PR build supplies
-WebAssembly and frozen firmware data. The read-only build replaces the PR
-build's generated JavaScript with its runtime and updates artifact hashes. A
-separate read-only job in the protected publish workflow independently builds
-the trusted runtime; the write-enabled job verifies the browser JavaScript
-against that artifact. HTML, CSS, images, UI logic, worker, peripheral
-implementation, and the experimental warning come from the publisher's
-simulator checkout. Its worker inherits a CSP allowing same-site assets and
-the local Virtual Host on port 8788 while blocking other outbound connections.
-
-A separate `Publish browser simulator` workflow runs from the trusted default
-branch after `Build` completes. It verifies that the browser manifest, its
-artifact hashes, the firmware hashes, and both provenance records identify the
-same still-current PR head. It never executes the downloaded build. A passing
-default-branch build updates the stable Pages root; a passing PR build updates
-`/pr/<number>/` and a single PR comment with links to the simulator, firmware
-artifact, and build log. A failed current PR build removes its stale preview
-and replaces that one comment with a failure notice, even when it uploaded no
-artifacts. The PR is identified from the trusted `workflow_run` event and
-checked against the current pull-request API record. A run
-superseded by a newer PR commit cannot replace the current preview. The
-publisher keeps an
-`gh-pages` branch as static state and uses `actions/deploy-pages` to deploy the
-complete tree. PRs receive no write token or deployment credentials.
-
-Deploy the simulator changes to its trusted `main` branch before enabling the
-new firmware workflow on the firmware default branch. Remove legacy PR
-previews from `gh-pages` once, then rebuild open PRs so old published shells
-cannot remain reachable. GitHub Pages must use **GitHub Actions** as its
-deployment source. A PR with new C imports may require a compatible trusted
-Emscripten runtime update before its WebAssembly can run; the browser smoke
-tests must pass with the combined artifacts.
-
-### Rebuild an older open PR without a commit
-
-Once this workflow is on the default branch, use **Actions → Build → Run
-workflow**, select the default branch, and enter the PR number and the first
-seven (or more) hexadecimal characters of its current head SHA. The Build job
-resolves the prefix against that PR's current full head SHA before checking out
-source. If the head changes to a different prefix before publication, the
-publisher ignores the stale run. Seven characters are convenient but are not
-globally unique; use a longer prefix when comparing closely spaced revisions.
-Whitespace around the inputs is ignored. If the SHA does not match the PR's
-current head, the target job reports the current prefix and stops the build.
-The CLI helper needs only the PR number and reads the SHA itself:
+Install the native tools used by the build and bridge:
 
 ```sh
-python3 web/tools/trigger_pr_build.py 123 --repo cryptoadvance/specter-diy
+sudo apt-get update
+sudo apt-get install --no-install-recommends build-essential git make pkg-config libffi-dev libgmp-dev libreadline-dev libsdl2-dev libgtk-3-dev libwebkit2gtk-4.1-dev
 ```
 
-This starts the existing `Build` workflow; it does not create another Actions
-workflow or add a commit to the PR. Manual runs check out the PR's exact head
-for Specter source and firmware, but use the current default branch's browser
-build tools and website shell. The browser manifest records both the PR source
-commit and the simulator tooling commit. The publisher checks both,
-and it can remove a failed current manual preview without downloading any
-artifact. A very old PR with incompatible MicroPython/LVGL or firmware sources
-may still fail to build; its build log will show the concrete incompatibility.
-GitHub's manual Run workflow button is unavailable until this workflow file is
-present on the repository's default branch.
+Install the exact Node, Python, and Go versions above using the version
+managers supported in your environment. Check them before building:
 
-For `cryptoadvance/specter-diy`, enable **Settings → Pages → Build and deployment →
-GitHub Actions** once. Confirm Actions are enabled and allow the publisher workflow
-to write to the repository. After the first successful default-branch build,
-the stable URL is `https://cryptoadvance.github.io/specter-diy/`; PR previews
-are `https://cryptoadvance.github.io/specter-diy/pr/<number>/`. The same workflow
-uses `GITHUB_REPOSITORY` and works in another fork after its owner enables
-Actions and Pages. PR previews are untrusted development code; the warning
-is permanent and no wallet secrets should ever be entered.
+```sh
+node --version
+python3 --version
+go version
+```
 
-GitHub Pages does not provide COOP/COEP response headers. This build does not
-require SharedArrayBuffer. The DIY display has a Canvas pixel bridge for
-browsers without transferable OffscreenCanvas. Chromium is covered by CI;
-Firefox and WebKit should be checked when changing the display bridge. Test
-on physical mobile devices and hardware before any release claim.
+### Checkout layout and source selection
+
+Keep the two repositories side by side. Select the exact Specter checkout to
+simulate, including a fork checkout when you are building a fork PR:
+
+```text
+work/
+  specter-diy/                 # source commit to simulate
+  specter-diy-web-simulator/   # this repository
+```
+
+From this Web Simulator repository root:
+
+```sh
+git clone --recursive https://github.com/OWNER/specter-diy.git ../specter-diy
+git -C ../specter-diy checkout --detach <FULL_40_CHARACTER_SPECTER_SHA>
+git -C ../specter-diy submodule update --init --recursive
+git status --short --branch
+```
+
+Replace `OWNER` with the repository that owns the source commit and replace
+the SHA with the exact commit you intend to simulate. Set the source
+repository explicitly so the build manifest records the right fork identity:
+
+```sh
+export SPECTER_SRC="$PWD/../specter-diy"
+export SPECTER_SOURCE_REPOSITORY="OWNER/specter-diy"
+export SIMULATOR_REPOSITORY="cryptoadvance/specter-diy-web-simulator"
+export SIMULATOR_COMMIT="$(git rev-parse HEAD)"
+```
+
+The browser output is written under
+`web/builds/<owner>/<repo>/<source-sha>/`; the current build pointer is
+`web/browser/current.json`.
+
+### Install Emscripten and build
+
+From this repository root, check out the pinned Emscripten SDK bootstrap and
+build the selected Specter commit:
+
+```sh
+mkdir -p .browser-work
+git clone https://github.com/emscripten-core/emsdk.git .browser-work/emsdk
+git -C .browser-work/emsdk checkout --detach 3d6d8ee910466516a53e665b86458faa81dae9ba
+.browser-work/emsdk/emsdk install 3.1.74
+.browser-work/emsdk/emsdk activate 3.1.74
+source .browser-work/emsdk/emsdk_env.sh
+bash web/browser/build-browser.sh
+```
+
+The build uses the selected Specter commit's MicroPython/LVGL submodules and
+freezes `specter-diy/src`. It applies browser compatibility changes to the
+build checkout and emits JavaScript, WebAssembly, preloaded data, and
+`build-info.json`. It does not rewrite Specter wallet screens or logic.
+
+### Verify, test, and serve locally
+
+Run the provenance checks and simulator unit tests:
+
+```sh
+python3 web/browser/verify_build.py
+python3 web/tests/test-resolve-build-target.py
+python3 web/tests/test-package-preview.py
+python3 web/tests/test-source-project.py
+python3 web/tests/test-usb-vcp.py
+node web/tests/test-build-provenance.mjs
+npm ci --prefix web
+npx --prefix web playwright install --with-deps chromium
+```
+
+Serve the built simulator from another shell:
+
+```sh
+python3 -m http.server 8765 --directory web
+```
+
+Open <http://127.0.0.1:8765/>. The exact generated files remain in
+`web/builds` and `web/browser/current.json`.
+
+In another shell, run the browser suite and network-policy test against the
+served simulator:
+
+```sh
+npm ci --prefix web
+npx --prefix web playwright install --with-deps chromium
+CI=true npm run test:browser --prefix web
+node web/tests/test-network-policy.mjs
+```
+
+The Playwright suite boots the real WASM application in Chromium. The network
+test confirms its worker cannot make an outbound HTTP request.
+
+### Connect Specter Virtual Host
+
+Build or install Specter Virtual Host. CI tests against the immutable
+Virtual Host commit **3cf3ecd58a97da0f2cc4b7586ca33abf02f68372**; the SHA is
+recorded in [the workflow](../.github/workflows/build-preview.yml). Then start
+its local bridge in another shell:
+
+```sh
+git clone https://github.com/cryptoadvance/specter-virtual-host.git ../specter-virtual-host
+git -C ../specter-virtual-host checkout --detach 3cf3ecd58a97da0f2cc4b7586ca33abf02f68372
+cd ../specter-virtual-host
+go run -tags webkit2_41 . serve --headless --site http://127.0.0.1:8765
+```
+
+Open <http://127.0.0.1:8765/?virtual-host=1>. The simulator connects to the
+local bridge at port 8788; Virtual Host exposes the wallet/HWI endpoint at
+port 8789. The integration test sends binary USB frames in both directions
+and verifies they are unchanged. No remote service is involved.
+
+With both services running, use a third shell from the Web Simulator root:
+
+```sh
+node web/tests/test-usb-transport.mjs
+```
+
+## CI workflow
+
+A caller in a Specter DIY repository invokes this workflow by a full
+40-character commit SHA:
+
+```yaml
+uses: cryptoadvance/specter-diy-web-simulator/.github/workflows/build-preview.yml@<FULL_40_CHARACTER_SHA>
+```
+
+The reusable workflow reads source repository, PR number, and source SHA from
+the caller event. GitHub's `job.workflow_repository` and `job.workflow_sha`
+identify the exact Web Simulator repository commit that is running. The
+workflow has `contents: read`, no secret inputs, and no publication steps.
+It builds in the caller's Actions run; it is not a centralized build service.
+A developer needs to fork only `specter-diy`.
+
+The workflow builds JavaScript glue a second time from the caller's base
+Specter source and the same pinned simulator tooling. The untrusted PR build
+replaces its generated JavaScript with that independently built runtime,
+then verifies all generated hashes and provenance before upload. A PR that
+adds incompatible C imports may need the trusted runtime updated before the
+browser smoke test can pass.
+
+The artifact contract is versioned with `schema_version: 1` and records:
+
+- `source_repository`, `source_sha`, and `pr_number`.
+- `web_simulator_repository` and `web_simulator_sha`.
+- `workflow_run_id` and `workflow_run_attempt`, so reruns cannot be confused
+  with artifacts from an earlier attempt.
+- `browser/current.json` and the addressed build files, each with byte count
+  and SHA-256 digest.
+
+The trusted publisher is deliberately outside this repository. It runs from
+the calling Specter repository's protected default branch, validates artifact
+data against the live PR and the immutable workflow pin, and alone publishes
+Pages or updates PR comments.
+
+## Pin maintenance
+
+The blocking compatibility test uses Virtual Host commit
+`3cf3ecd58a97da0f2cc4b7586ca33abf02f68372`, not a moving branch. To update
+it, review a candidate Virtual Host commit and update the `ref` in
+`.github/workflows/build-preview.yml`, the pin in this section and README,
+and `web/tests/test-workflow-contract.py`. Run the unit, browser, USB, and
+network-policy checks before accepting the change.
+
+All action dependencies and the Emscripten bootstrap are pinned to full commit
+SHAs. Node, Python, Go, Chromium, and JavaScript packages use explicit versions
+or the committed lockfile.
+
+## Safety
+
+The browser build is experimental. Use public test data only. Never enter a
+real seed phrase or use real funds. The page runs the PR's firmware logic and
+cannot simulate physical hardware security, an air gap, STM32 timing, or the
+physical properties of the card and device.
