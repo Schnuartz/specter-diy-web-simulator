@@ -26,6 +26,11 @@ jobs:
         run: npm ci --prefix web
       - name: Run simulator unit tests
         run: |
-          python3 web/tests/test-resolve-build-target.py
-          python3 web/tests/test-trigger-pr.py
+          for test in web/tests/test-*.py; do
+            if [[ "$test" == *test-browser-manifest.py ]]; then continue; fi
+            python3 "$test"
+          done
+      - name: Run build-independent JavaScript tests
+        run: |
           node web/tests/test-demo-data.mjs
+          node web/tests/test-build-provenance.mjs

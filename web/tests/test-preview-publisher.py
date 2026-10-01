@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""Adversarial artifact and persistent preview lifecycle tests."""
+from hashlib import sha256
+from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+import json
+import shutil
+import sys
+import tarfile
+import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+import publish_preview as publisher
+
+
+BASE = "alice/specter-diy"
+SERVICE = "alice/specter-diy-web-simulator"
+SOURCE = "bob/specter-diy"
+SHA = "a" * 40
+SIM_SHA = "b" * 40
+UPDATED = "2026-09-30T12:00:00.000000Z"
+ARTIFACTS = ("micropython.js", "micropython.wasm", "micropython.data")
+
+
+def request(sha=SHA, updated=UPDATED, action="build", run_id=101):
+    return {
+        "request_id": f"specter-pr-19-{sha}-{run_id}-1",
+        "action": action,
+        "base_repository": BASE,
+        "pr_number": 19,
+        "head_repository": SOURCE,
+        "head_sha": sha,
+        "head_ref": "feature",
+        "source_updated_at": updated,
+    }
+
+
+def live_pr(req, state="open"):
+    return {
+        "number": req["pr_number"],
+        "state": state,
+        "updated_at": req["source_updated_at"],
+        "base": {"repo": {"full_name": req["base_repository"]}, "ref": "main"},
+        "head": {
+            "sha": req["head_sha"],
+            "ref": req["head_ref"],
+            "repo": {"full_name": req["head_repository"]} if req["head_repository"] else None,
+        },
+    }
+
+
+def browser_archive(path: Path, req: dict, tamper=None) -> None:
+    build_path = f"builds/{req['head_repository']}/{req['head_sha']}/"
+    prefix = build_path
+    data = {name: f"browser:{name}:{req['head_sha']}".encode() for name in ARTIFACTS}
+    records = {name: {"bytes": len(payload), "sha256": sha256(payload).hexdigest()}
+               for name, payload in data.items()}
+    ordered_hashes = [records[name]["sha256"] for name in sorted(records)]
+    artifact_set = sha256("".join(ordered_hashes).encode()).hexdigest()
+    build_info = {
+        "source": {"repository": req["head_repository"], "commit": req["head_sha"]},
+        "simulator": {"repository": SERVICE, "commit": SIM_SHA},
+        "artifacts": records,
+        "artifact_set_sha256": artifact_set,
+    }
+    entries = {
+        "browser/current.json": json.dumps({"build": build_path, "version": artifact_set[:16]}).encode() + b"\n",
+        prefix + "build-info.json": json.dumps(build_info).encode() + b"\n",
+        **{prefix + name: payload for name, payload in data.items()},
+    }
+    manifest = {
+        "schema": 1,
+        "kind": "browser-preview",
+        "base_repository": req["base_repository"],
+        "source_repository": req["head_repository"],
+        "source_sha": req["head_sha"],
+        "pr_number": req["pr_number"],
+        "request_id": req["request_id"],
+        "source_updated_at": req["source_updated_at"],
+        "simulator_repository": SERVICE,
+        "simulator_sha": SIM_SHA,
+        "build_path": build_path,
+        "files": {name: {"bytes": len(payload), "sha256": sha256(payload).hexdigest()}
+                  for name, payload in entries.items()},
+    }
+    entries["manifest.json"] = json.dumps(manifest).encode()
+    if tamper == "wrong-request":
+        manifest["request_id"] = "specter-pr-19-wrong"
+        entries["manifest.json"] = json.dumps(manifest).encode()
+    elif tamper == "wrong-source":
+        manifest["source_sha"] = "c" * 40
+        entries["manifest.json"] = json.dumps(manifest).encode()
+    elif tamper == "fake-hash":
+        first = next(iter(manifest["files"].values()))
+        first["sha256"] = "0" * 64
+        entries["manifest.json"] = json.dumps(manifest).encode()
+    elif tamper == "wrong-browser-repo":
+        build_info["source"]["repository"] = "mallory/specter-diy"
+        entries[prefix + "build-info.json"] = json.dumps(build_info).encode()
+        record = manifest["files"][prefix + "build-info.json"]
+        record.update(bytes=len(entries[prefix + "build-info.json"]),
+                      sha256=sha256(entries[prefix + "build-info.json"]).hexdigest())
+        entries["manifest.json"] = json.dumps(manifest).encode()
+
+    with tarfile.open(path, "w:gz") as archive:
+        for name, payload in entries.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            info.mode = 0o644
+            archive.addfile(info, BytesIO(payload))
+
+
+def firmware_artifact(path: Path, req: dict, tamper=None) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    files = {name: f"firmware:{name}:{req['head_sha']}".encode() for name in publisher.FIRMWARE_FILES}
+    records = {name: {"bytes": len(data), "sha256": sha256(data).hexdigest()}
+               for name, data in files.items()}
+    provenance = {
+        "schema": 1,
+        "kind": "firmware",
+        "base_repository": req["base_repository"],
+        "source_repository": req["head_repository"],
+        "source_sha": req["head_sha"],
+        "pr_number": req["pr_number"],
+        "request_id": req["request_id"],
+        "source_updated_at": req["source_updated_at"],
+        "simulator_repository": SERVICE,
+        "simulator_sha": SIM_SHA,
+        "files": records,
+    }
+    if tamper == "wrong-sha":
+        provenance["source_sha"] = "c" * 40
+    if tamper == "fake-hash":
+        provenance["files"]["specter-diy.bin"]["sha256"] = "f" * 64
+    for name, data in files.items():
+        (path / name).write_bytes(data)
+    (path / "source.json").write_text(json.dumps(provenance), encoding="utf-8")
+    if tamper == "unexpected":
+        (path / "evil.sh").write_text("not executable")
+
+
+class PreviewPublisherTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.pages = self.root / "pages"
+        self.pages.mkdir()
+        self.archive = self.root / "browser-preview-payload.tar.gz"
+        self.firmware = self.root / "firmware"
+        self.trusted = self.root / "trusted-web"
+        (self.trusted / "browser").mkdir(parents=True)
+        (self.trusted / "assets").mkdir()
+        (self.trusted / "index.html").write_text("trusted shell")
+        (self.trusted / "browser/site.js").write_text("trusted UI")
+        (self.trusted / "browser/runtime-worker.js").write_text("trusted worker")
+        (self.trusted / "assets/logo.svg").write_text("trusted asset")
+        self.env = patch.dict("os.environ", {"GITHUB_REPOSITORY": SERVICE})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def apply(self, req, result="success", build_tamper=None, firmware_tamper=None,
+              run_id=101, live_state="open"):
+        browser_archive(self.archive, req, build_tamper)
+        firmware_artifact(self.firmware, req, firmware_tamper)
+        return publisher.publish(
+            req, self.pages, self.archive, self.firmware, self.trusted, result,
+            SERVICE, SIM_SHA, run_id, 1,
+            f"https://github.com/{SERVICE}/actions/runs/{run_id}/artifacts/123",
+            "token", lambda *_: live_pr(req, live_state),
+        )
+
+    def test_fork_source_publishes_correct_preview_firmware_and_status(self):
+        result = self.apply(request())
+        preview = self.pages / "pr/19"
+        self.assertEqual(result, {"applied": True, "status": "success"})
+        self.assertEqual((preview / "index.html").read_text(), "trusted shell")
+        self.assertEqual((preview / "browser/site.js").read_text(), "trusted UI")
+        self.assertEqual((preview / f"builds/{SOURCE}/{SHA}/micropython.wasm").read_bytes(),
+                         f"browser:micropython.wasm:{SHA}".encode())
+        self.assertTrue((self.pages / ".preview-state/pr/19.json").is_file())
+        status = json.loads((self.pages / "status/pr/19.json").read_text())
+        self.assertEqual(status["request_id"], request()["request_id"])
+        self.assertEqual(status["source_repository"], SOURCE)
+        self.assertEqual(status["preview_url"], "https://alice.github.io/specter-diy-web-simulator/pr/19/")
+        self.assertIn("artifacts/123", status["firmware_url"])
+
+    def test_malicious_browser_archive_paths_symlinks_and_executables_fail_closed(self):
+        req = request()
+        malicious = ["traversal", "absolute", "unexpected", "symlink", "nested-symlink", "executable"]
+        for kind in malicious:
+            with self.subTest(kind=kind):
+                shutil.rmtree(self.pages / ".preview-state", ignore_errors=True)
+                shutil.rmtree(self.pages / "status", ignore_errors=True)
+                if (self.pages / "pr/19").exists():
+                    shutil.rmtree(self.pages / "pr/19")
+                (self.pages / "pr/19").mkdir(parents=True)
+                (self.pages / "pr/19/old.html").write_text("stale")
+                self.apply_malicious_archive(req, kind)
+                result = publisher.publish(
+                    req, self.pages, self.archive, self.firmware, self.trusted, "success",
+                    SERVICE, SIM_SHA, 101, 1,
+                    f"https://github.com/{SERVICE}/actions/runs/101/artifacts/123",
+                    "token", lambda *_: live_pr(req),
+                )
+                self.assertEqual(result["status"], "failure")
+                self.assertFalse((self.pages / "pr/19").exists())
+
+    def apply_malicious_archive(self, req, kind):
+        browser_archive(self.archive, req)
+        firmware_artifact(self.firmware, req)
+        valid = {}
+        with tarfile.open(self.archive, "r:gz") as archive:
+            for member in archive.getmembers():
+                stream = archive.extractfile(member)
+                valid[member.name] = (member, stream.read() if stream else b"")
+        if kind in ("traversal", "absolute", "unexpected"):
+            member, data = valid.pop("browser/current.json")
+            name = {"traversal": "../escape.json", "absolute": "/tmp/escape.json",
+                    "unexpected": "browser/evil.sh"}[kind]
+            valid[name] = (member, data)
+        elif kind in ("symlink", "nested-symlink"):
+            target = "browser/current.json" if kind == "symlink" else (
+                f"builds/{SOURCE}/{SHA}/micropython.wasm")
+            valid.pop(target)
+            link = tarfile.TarInfo(target)
+            link.type = tarfile.SYMTYPE
+            link.linkname = "../../escape"
+            valid[target] = (link, b"")
+        elif kind == "executable":
+            member, data = valid["browser/current.json"]
+            member.mode = 0o755
+            valid["browser/current.json"] = (member, data)
+        with tarfile.open(self.archive, "w:gz") as archive:
+            for name, (member, data) in valid.items():
+                info = tarfile.TarInfo(name)
+                info.type = member.type
+                info.linkname = member.linkname
+                info.mode = member.mode
+                info.size = len(data) if info.isfile() else 0
+                archive.addfile(info, BytesIO(data) if info.isfile() else None)
+
+    def test_malformed_archive_and_metadata_hash_repository_request_tampering_fail(self):
+        for index, kind in enumerate(("malformed", "wrong-request", "wrong-source", "fake-hash", "wrong-browser-repo")):
+            with self.subTest(kind=kind):
+                shutil.rmtree(self.pages / ".preview-state", ignore_errors=True)
+                shutil.rmtree(self.pages / "status", ignore_errors=True)
+                req = request(run_id=101 + index)
+                if kind == "malformed":
+                    self.archive.write_bytes(b"not a tar archive")
+                    firmware_artifact(self.firmware, req)
+                else:
+                    browser_archive(self.archive, req, kind)
+                    firmware_artifact(self.firmware, req)
+                result = publisher.publish(
+                    req, self.pages, self.archive, self.firmware, self.trusted, "success",
+                    SERVICE, SIM_SHA, 101 + index, 1,
+                    f"https://github.com/{SERVICE}/actions/runs/{101 + index}/artifacts/123",
+                    "token", lambda *_: live_pr(req),
+                )
+                self.assertEqual(result["status"], "failure")
+
+    def test_firmware_sha_and_hash_mismatch_are_rejected(self):
+        for index, kind in enumerate(("wrong-sha", "fake-hash", "unexpected")):
+            with self.subTest(kind=kind):
+                shutil.rmtree(self.pages / ".preview-state", ignore_errors=True)
+                shutil.rmtree(self.pages / "status", ignore_errors=True)
+                req = request(run_id=101 + index)
+                browser_archive(self.archive, req)
+                firmware_artifact(self.firmware, req, kind)
+                result = publisher.publish(
+                    req, self.pages, self.archive, self.firmware, self.trusted, "success",
+                    SERVICE, SIM_SHA, 101 + index, 1,
+                    f"https://github.com/{SERVICE}/actions/runs/{101 + index}/artifacts/123",
+                    "token", lambda *_: live_pr(req),
+                )
+                self.assertEqual(result["status"], "failure")
+
+    def test_newer_failure_removes_previous_executable_preview(self):
+        old = request()
+        (self.pages / "pr/19").mkdir(parents=True)
+        (self.pages / "pr/19/index.html").write_text("old successful preview")
+        newer = request(sha="c" * 40, updated="2026-10-01T12:00:00.000000Z", run_id=102)
+        result = publisher.publish(
+            newer, self.pages, self.archive, self.firmware, self.trusted, "failure",
+            SERVICE, SIM_SHA, 202, 1, "", "token", lambda *_: live_pr(newer),
+        )
+        self.assertEqual(result["status"], "failure")
+        self.assertFalse((self.pages / "pr/19").exists())
+        self.assertEqual(json.loads((self.pages / "status/pr/19.json").read_text())["status"], "failure")
+
+    def test_old_completion_cannot_overwrite_newer_success_or_close_tombstone(self):
+        newest = request(sha="c" * 40, updated="2026-10-01T12:00:00.000000Z", run_id=102)
+        browser_archive(self.archive, newest)
+        firmware_artifact(self.firmware, newest)
+        publisher.publish(newest, self.pages, self.archive, self.firmware, self.trusted,
+                          "success", SERVICE, SIM_SHA, 202, 1,
+                          f"https://github.com/{SERVICE}/actions/runs/202/artifacts/123",
+                          "token", lambda *_: live_pr(newest))
+        preview_file = self.pages / "pr/19/index.html"
+        self.assertTrue(preview_file.is_file())
+        older = request(sha=SHA, updated=UPDATED, run_id=101)
+        before = (self.pages / "status/pr/19.json").read_text()
+        result = self.apply(older, run_id=101)
+        self.assertEqual(result["status"], "stale")
+        self.assertEqual((self.pages / "status/pr/19.json").read_text(), before)
+        self.assertTrue(preview_file.is_file())
+
+        closed = request(sha="c" * 40, updated="2026-10-02T12:00:00.000000Z",
+                         action="delete", run_id=103)
+        deleted = publisher.publish(closed, self.pages, self.archive, self.firmware,
+                                    self.trusted, "deleted", SERVICE, SIM_SHA,
+                                    203, 1, "", "token", lambda *_: live_pr(closed, "closed"))
+        self.assertEqual(deleted["status"], "deleted")
+        self.assertFalse((self.pages / "pr/19").exists())
+        old_again = self.apply(older, run_id=101)
+        self.assertEqual(old_again["status"], "stale")
+        state = json.loads((self.pages / ".preview-state/pr/19.json").read_text())
+        self.assertEqual(state["latest_action"], "delete")
+
+    def test_equal_event_timestamp_uses_remote_run_order_and_other_prs_survive(self):
+        preserved = self.pages / "pr/99"
+        preserved.mkdir(parents=True)
+        (preserved / "index.html").write_text("other PR")
+        first = request(run_id=100)
+        browser_archive(self.archive, first)
+        firmware_artifact(self.firmware, first)
+        publisher.publish(first, self.pages, self.archive, self.firmware, self.trusted,
+                          "success", SERVICE, SIM_SHA, 301, 1,
+                          f"https://github.com/{SERVICE}/actions/runs/301/artifacts/123",
+                          "token", lambda *_: live_pr(first))
+        second = request(run_id=101)
+        browser_archive(self.archive, second)
+        firmware_artifact(self.firmware, second)
+        result = publisher.publish(second, self.pages, self.archive, self.firmware, self.trusted,
+                                   "success", SERVICE, SIM_SHA, 302, 1,
+                                   f"https://github.com/{SERVICE}/actions/runs/302/artifacts/123",
+                                   "token", lambda *_: live_pr(second))
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(preserved.is_dir())
+        stale = publisher.publish(first, self.pages, self.archive, self.firmware, self.trusted,
+                                  "success", SERVICE, SIM_SHA, 301, 1,
+                                  f"https://github.com/{SERVICE}/actions/runs/301/artifacts/123",
+                                  "token", lambda *_: live_pr(first))
+        self.assertEqual(stale["status"], "stale")
+
+    def test_symlinked_firmware_and_trusted_shell_are_rejected(self):
+        req = request()
+        browser_archive(self.archive, req)
+        firmware_artifact(self.firmware, req)
+        (self.firmware / "specter-diy.hex").unlink()
+        try:
+            (self.firmware / "specter-diy.hex").symlink_to(self.firmware / "specter-diy.bin")
+        except OSError:
+            self.skipTest("Creating symlinks requires privileges on this Windows host")
+        result = publisher.publish(
+            req, self.pages, self.archive, self.firmware, self.trusted, "success",
+            SERVICE, SIM_SHA, 101, 1,
+            f"https://github.com/{SERVICE}/actions/runs/101/artifacts/123",
+            "token", lambda *_: live_pr(req),
+        )
+        self.assertEqual(result["status"], "failure")
+
+
+if __name__ == "__main__":
+    unittest.main()
