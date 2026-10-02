@@ -3,9 +3,10 @@
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from validate_preview_request import parse_request, validate_request
+from validate_preview_request import fetch_pull, parse_request, validate_request
 
 
 BASE = "cryptoadvance/specter-diy"
@@ -43,6 +44,22 @@ def pull(state="open", repository=HEAD, sha=SHA, updated=UPDATED, number=19, bas
 
 
 class PreviewRequestTests(unittest.TestCase):
+    def test_live_pull_request_fetch_sends_bearer_token(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"number":19}'
+
+        with patch("validate_preview_request.urlopen", return_value=Response()) as open_url:
+            self.assertEqual(fetch_pull(BASE, 19, "workflow-token"), {"number": 19})
+        request = open_url.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer workflow-token")
+
     def test_contributor_fork_request_resolves_against_paired_base(self):
         result = validate_request(payload(), SERVICE, "token", lambda *_: pull())
         self.assertEqual(result["base_repository"], BASE)

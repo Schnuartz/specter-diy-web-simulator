@@ -50,6 +50,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       request_id: ${{ steps.validate.outputs.request_id }}
       action: ${{ steps.validate.outputs.action }}
@@ -70,6 +71,7 @@ jobs:
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           PREVIEW_INPUTS_JSON: ${{ toJSON(inputs) }}
+          GH_TOKEN: ${{ github.token }}
         run: python3 web/tools/validate_preview_request.py
 
   build:
@@ -80,7 +82,7 @@ jobs:
     timeout-minutes: 180
     concurrency:
       group: preview-build-${{ github.repository }}-${{ needs.validate.outputs.pr_number }}
-      cancel-in-progress: false
+      cancel-in-progress: true
     permissions:
       contents: read
     outputs:
@@ -165,7 +167,11 @@ jobs:
       - name: Install Emscripten 3.1.74
         run: |
           mkdir -p simulator/.browser-work
-          git clone https://github.com/emscripten-core/emsdk.git simulator/.browser-work/emsdk
+          git init simulator/.browser-work/emsdk
+          git -C simulator/.browser-work/emsdk remote add origin https://github.com/emscripten-core/emsdk.git
+          git -C simulator/.browser-work/emsdk fetch --depth 1 origin refs/tags/3.1.74
+          git -C simulator/.browser-work/emsdk checkout --detach FETCH_HEAD
+          test "$(git -C simulator/.browser-work/emsdk rev-parse HEAD)" = "$(cat simulator/.preview-config/emsdk-commit)"
           simulator/.browser-work/emsdk/emsdk install 3.1.74
           simulator/.browser-work/emsdk/emsdk activate 3.1.74
       - name: Build browser simulator from the same exact Specter SHA
@@ -246,6 +252,7 @@ jobs:
       contents: write
       pages: write
       id-token: write
+      pull-requests: read
     env:
       GH_TOKEN: ${{ github.token }}
       REQUEST_ID: ${{ needs.validate.outputs.request_id }}
@@ -331,7 +338,7 @@ jobs:
       - name: Add finalization result to the workflow summary
         if: always()
         run: |
-          echo "Request: `$REQUEST_ID`" >> "$GITHUB_STEP_SUMMARY"
-          echo "Action: `$ACTION`" >> "$GITHUB_STEP_SUMMARY"
-          echo "Build job: `${{ needs.build.result }}`" >> "$GITHUB_STEP_SUMMARY"
-          echo "Status JSON: `status/pr/$PR_NUMBER.json`" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Request: `%s`\n' "$REQUEST_ID" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Action: `%s`\n' "$ACTION" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Build job: `%s`\n' '${{ needs.build.result }}' >> "$GITHUB_STEP_SUMMARY"
+          printf 'Status JSON: `status/pr/%s.json`\n' "$PR_NUMBER" >> "$GITHUB_STEP_SUMMARY"

@@ -42,7 +42,9 @@ git clone https://github.com/cryptoadvance/specter-diy-web-simulator.git
 ```
 
 Install the native packages used by Specter, Nix, Python 3.11, Node.js 22, Go
-1.22, and Emscripten 3.1.74. From Linux or WSL:
+1.22, and Emscripten 3.1.74. CI checks out the emsdk installer at the immutable
+commit in `.preview-config/emsdk-commit`, then installs Emscripten 3.1.74 from
+that pinned installer. From Linux or WSL:
 
 ```sh
 sudo apt-get install build-essential libffi-dev libgmp-dev libreadline-dev \
@@ -142,11 +144,25 @@ for the basic setup.
 ## Request validation and lifecycle
 
 Specter DIY's `pull_request_target` workflow handles PR open, synchronize,
-reopen, ready-for-review, and close events. It reads only trusted event
-metadata and a script checked out from the protected default branch; it does
-not check out or execute PR code. It dispatches a unique request ID, base and
-head repositories, PR number, exact head SHA/ref, action, and source
-`updated_at`. Closing a PR sends `action=delete`.
+reopen, ready-for-review, approval-label, and close events. Same-repository PRs
+start automatically. A fork PR needs a maintainer to add the `preview-approved`
+label; adding that label starts the preview. Closing a PR always dispatches
+cleanup, regardless of labels. The workflow reads only trusted event metadata
+and a script checked out from the protected default branch; it does not check
+out or execute PR code. It dispatches a unique request ID, base and head
+repositories, PR number, exact head SHA/ref, action, and source `updated_at`.
+Closing a PR sends `action=delete`.
+
+The dispatcher polls for up to 210 minutes. This covers the paired service's
+5-minute validation, 180-minute build, and 10-minute finalizer, with a short
+buffer; the caller workflow allows 240 minutes. The service cancels an older
+build for the same PR when a newer request arrives, and its persistent state
+prevents a stale finalizer from replacing a newer result.
+
+This workflow uses `pull_request_target`. Repository or organization Actions
+policy must permit that event for public repositories. A repository or
+organization administrator should verify the policy before GitHub's announced
+November 2, 2026 enforcement date.
 
 The Web Simulator validates the paired base repository and compares the request
 to the live GitHub PR before building. Build requests must match an open PR's
@@ -155,6 +171,13 @@ SHA, including submodules. The caller polls the public status JSON and accepts
 only a matching request ID, PR number, and source SHA. It uses its own local
 `GITHUB_TOKEN` to update one comment; this service never receives a credential
 that can modify Specter DIY.
+
+The service uses its workflow token with `pull-requests: read` to validate the
+live PR. Published PR pages receive a stricter copy of the trusted shell's
+Content Security Policy: `connect-src 'self'`. This blocks external network
+requests and the local Virtual Host WebSocket from PR previews. The stable
+simulator keeps the local Virtual Host allowance. Browser tests exercise both
+policies.
 
 Several PR previews coexist in `/pr/<N>/`. The trusted publisher serializes
 updates and keeps `.preview-state/pr/<N>.json` on its persistent `gh-pages`

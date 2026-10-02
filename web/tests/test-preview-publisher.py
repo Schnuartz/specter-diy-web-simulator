@@ -153,7 +153,12 @@ class PreviewPublisherTests(unittest.TestCase):
         self.trusted = self.root / "trusted-web"
         (self.trusted / "browser").mkdir(parents=True)
         (self.trusted / "assets").mkdir()
-        (self.trusted / "index.html").write_text("trusted shell")
+        (self.trusted / "index.html").write_text(
+            '<meta http-equiv="Content-Security-Policy" content="script-src \'self\'; '
+            "connect-src 'self' http://127.0.0.1:8788 ws://127.0.0.1:8788; "
+            'object-src \'none\'">',
+            encoding="utf-8",
+        )
         (self.trusted / "browser/site.js").write_text("trusted UI")
         (self.trusted / "browser/runtime-worker.js").write_text("trusted worker")
         (self.trusted / "assets/logo.svg").write_text("trusted asset")
@@ -176,7 +181,10 @@ class PreviewPublisherTests(unittest.TestCase):
         result = self.apply(request())
         preview = self.pages / "pr/19"
         self.assertEqual(result, {"applied": True, "status": "success"})
-        self.assertEqual((preview / "index.html").read_text(), "trusted shell")
+        published_html = (preview / "index.html").read_text(encoding="utf-8")
+        self.assertIn("connect-src 'self'", published_html)
+        self.assertNotIn("127.0.0.1:8788", published_html)
+        self.assertNotIn("localhost:8788", published_html)
         self.assertEqual((preview / "browser/site.js").read_text(), "trusted UI")
         self.assertEqual((preview / f"builds/{SOURCE}/{SHA}/micropython.wasm").read_bytes(),
                          f"browser:micropython.wasm:{SHA}".encode())

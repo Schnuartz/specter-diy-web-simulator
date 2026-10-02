@@ -15,6 +15,7 @@ import shutil
 import tarfile
 
 from validate_preview_request import fetch_pull, parse_time, canonical_time
+from preview_csp import restrict_preview_csp
 
 
 ARTIFACTS = ("micropython.js", "micropython.wasm", "micropython.data")
@@ -333,6 +334,12 @@ def _copy_trusted_shell(trusted_web: Path, destination: Path) -> None:
             shutil.copytree(source, destination / required, dirs_exist_ok=True)
         else:
             shutil.copyfile(source, destination / required)
+
+    preview_index = destination / "index.html"
+    preview_index.write_text(
+        restrict_preview_csp(preview_index.read_text(encoding="utf-8")),
+        encoding="utf-8",
+    )
 
 
 def _valid_firmware_url(value: str, repository: str, run_id: int) -> str:

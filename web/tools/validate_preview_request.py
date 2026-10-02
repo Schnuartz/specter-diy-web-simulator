@@ -33,13 +33,16 @@ def canonical_time(value: datetime) -> str:
 
 
 def fetch_pull(repository: str, number: int, token: str) -> dict:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "specter-web-simulator-preview",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     request = Request(
         f"https://api.github.com/repos/{repository}/pulls/{number}",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "specter-web-simulator-preview",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers=headers,
     )
     with urlopen(request, timeout=30) as response:
         return json.load(response)
