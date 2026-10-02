@@ -23,12 +23,13 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("repository_dispatch:", WORKFLOW)
         self.assertIn("python3 web/tools/validate_preview_request.py", WORKFLOW)
         self.assertIn("DEFAULT_BRANCH:", WORKFLOW)
-        for field in ("request_id", "base_repository", "pr_number", "head_repository",
+        for field in ("request_id", "base_repository", "base_sha", "base_ref",
+                      "pr_number", "head_repository",
                       "head_sha", "head_ref", "source_updated_at"):
             self.assertIn(f"      {field}:", WORKFLOW)
 
     def test_untrusted_job_has_read_only_permissions_and_no_secrets(self):
-        build = job("build", "finalize")
+        build = job("build", "trusted_runtime")
         self.assertIn("permissions:\n      contents: read", build)
         self.assertNotIn("contents: write", build)
         self.assertNotIn("pages: write", build)
@@ -50,6 +51,26 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertIn("actions/deploy-pages@", finalize)
         self.assertIn("preview-publish-${{ github.repository }}", finalize)
 
+    def test_trusted_javascript_is_built_from_base_on_a_separate_runner(self):
+        runtime = job("trusted_runtime", "finalize")
+        self.assertIn("runs-on: ubuntu-latest", runtime)
+        self.assertIn("contents: read", runtime)
+        self.assertNotIn("contents: write", runtime)
+        self.assertNotIn("secrets.", runtime)
+        self.assertIn("ref: ${{ needs.validate.outputs.base_sha }}", runtime)
+        self.assertNotIn("needs.validate.outputs.head_sha", runtime)
+        self.assertIn("package_trusted_runtime.py", runtime)
+        self.assertIn("name: trusted-micropython-runtime", runtime)
+
+        build = job("build", "trusted_runtime")
+        self.assertIn("package_browser.py", build)
+        self.assertIn('ARTIFACTS = ("micropython.wasm", "micropython.data")',
+                      (ROOT / "web/tools/package_browser.py").read_text())
+        finalize = job("finalize")
+        self.assertIn("needs: [validate, build, trusted_runtime]", finalize)
+        self.assertIn("name: trusted-micropython-runtime", finalize)
+        self.assertIn("replace_glue(extracted", (ROOT / "web/tools/publish_preview.py").read_text())
+
     def test_live_pr_metadata_fetch_is_authenticated_in_trusted_jobs(self):
         validate = job("validate", "build")
         finalize = job("finalize")
@@ -61,7 +82,7 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertIn('headers["Authorization"] = f"Bearer {token}"', request_tool)
 
     def test_timeout_and_superseded_build_contract(self):
-        build = job("build", "finalize")
+        build = job("build", "trusted_runtime")
         finalize = job("finalize")
         self.assertIn("timeout-minutes: 180", build)
         self.assertIn("cancel-in-progress: true", build)
@@ -69,7 +90,7 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertLess(180, 210)
 
     def test_emsdk_is_pinned_and_summary_uses_printf(self):
-        build = job("build", "finalize")
+        build = job("build", "trusted_runtime")
         pin = (ROOT / ".preview-config/emsdk-commit").read_text().strip()
         self.assertRegex(pin, r"^[a-f0-9]{40}$")
         self.assertIn("fetch --depth 1 origin refs/tags/3.1.74", build)

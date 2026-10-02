@@ -95,6 +95,14 @@ def parse_request(inputs: dict, service_repository: str) -> dict:
 
     head_repository = inputs.get("head_repository", "")
     head_ref = inputs.get("head_ref", "")
+    base_sha = inputs.get("base_sha", "")
+    base_ref = inputs.get("base_ref", "")
+    if bool(base_sha) != bool(base_ref):
+        raise ValueError("base_sha and base_ref must be supplied together")
+    if base_sha and not SHA_RE.fullmatch(base_sha):
+        raise ValueError("base_sha must be a full 40-character commit SHA")
+    if base_ref and not _valid_ref(base_ref):
+        raise ValueError("base_ref must be a valid branch name")
     if action == "build":
         if not REPOSITORY_RE.fullmatch(head_repository):
             raise ValueError("Build requests require a valid head_repository")
@@ -111,6 +119,8 @@ def parse_request(inputs: dict, service_repository: str) -> dict:
         "request_id": request_id,
         "action": action,
         "base_repository": expected_base,
+        "base_sha": base_sha,
+        "base_ref": base_ref,
         "pr_number": number,
         "head_repository": head_repository,
         "head_sha": head_sha,
@@ -131,6 +141,16 @@ def validate_request(inputs: dict, service_repository: str, token: str,
     base_repo = (base.get("repo") or {}).get("full_name", "")
     if base_repo.lower() != request["base_repository"].lower():
         raise ValueError("PR belongs to another base repository")
+    live_base_sha = base.get("sha", "")
+    live_base_ref = base.get("ref", "")
+    if not SHA_RE.fullmatch(live_base_sha):
+        raise ValueError("PR base does not have a valid commit SHA")
+    if not _valid_ref(live_base_ref):
+        raise ValueError("PR base does not have a valid branch name")
+    if request["action"] == "build" and request["base_sha"] and request["base_sha"] != live_base_sha:
+        raise ValueError("PR base SHA no longer matches the validated base")
+    if request["action"] == "build" and request["base_ref"] and request["base_ref"] != live_base_ref:
+        raise ValueError("PR base ref no longer matches the validated base")
 
     head = pr.get("head") or {}
     live_sha = head.get("sha", "")
@@ -156,6 +176,8 @@ def validate_request(inputs: dict, service_repository: str, token: str,
     if live_updated < parse_time(request["source_updated_at"]):
         raise ValueError("source_updated_at is ahead of current PR metadata")
     request["head_repository"] = request["head_repository"] or ""
+    request["base_sha"] = live_base_sha
+    request["base_ref"] = live_base_ref
     return request
 
 
@@ -169,6 +191,7 @@ def main() -> None:
     output = os.environ["GITHUB_OUTPUT"]
     with open(output, "a", encoding="utf-8") as stream:
         for key in ("request_id", "action", "base_repository", "pr_number",
+                    "base_sha", "base_ref",
                     "head_repository", "head_sha", "head_ref", "source_updated_at",
                     "request_run_id", "request_run_attempt"):
             stream.write(f"{key}={result[key]}\n")

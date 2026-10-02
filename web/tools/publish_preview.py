@@ -12,16 +12,20 @@ import json
 import os
 import re
 import shutil
+import sys
 import tarfile
 
 from validate_preview_request import fetch_pull, parse_time, canonical_time
 from preview_csp import restrict_preview_csp
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "browser"))
+from replace_glue import replace_glue
 
 
-ARTIFACTS = ("micropython.js", "micropython.wasm", "micropython.data")
+ARTIFACTS = ("micropython.wasm", "micropython.data")
 FIRMWARE_FILES = ("specter-diy.bin", "specter-diy.hex")
 MAX_BROWSER_ARCHIVE = 160 * 1024 * 1024
 MAX_FIRMWARE_FILE = 32 * 1024 * 1024
+MAX_RUNTIME_SIZE = 20_000_000
 
 
 def _json_object(data: bytes | str) -> dict:
@@ -154,6 +158,8 @@ def _safe_extract_browser(archive_path: Path, destination: Path, request: dict,
         "schema": 1,
         "kind": "browser-preview",
         "base_repository": request["base_repository"],
+        "base_sha": request["base_sha"],
+        "base_ref": request["base_ref"],
         "source_repository": request["head_repository"],
         "source_sha": request["head_sha"],
         "pr_number": request["pr_number"],
@@ -270,12 +276,70 @@ def _validate_firmware(directory: Path, request: dict, simulator_repository: str
     return provenance
 
 
+def _validate_trusted_runtime(directory: Path, request: dict,
+                              simulator_repository: str, simulator_sha: str) -> dict:
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError("Missing trusted runtime Actions artifact")
+    actual_names = set()
+    for path in directory.iterdir():
+        if path.is_symlink() or not path.is_file() or path.stat().st_nlink > 1:
+            raise ValueError("Trusted runtime artifact contains a symlink or non-file")
+        actual_names.add(path.name)
+    if actual_names != {"micropython.js", "runtime.json"}:
+        raise ValueError("Trusted runtime artifact has an unexpected file set")
+
+    runtime_path = directory / "micropython.js"
+    if runtime_path.stat().st_size == 0 or runtime_path.stat().st_size > MAX_RUNTIME_SIZE:
+        raise ValueError("Trusted JavaScript runtime has an invalid size")
+    runtime_manifest_path = directory / "runtime.json"
+    if runtime_manifest_path.stat().st_size > 64 * 1024:
+        raise ValueError("Trusted runtime manifest exceeds size limit")
+    runtime = _json_object(runtime_manifest_path.read_bytes())
+    expected = {
+        "schema": 1,
+        "kind": "trusted-browser-runtime",
+        "base_repository": request["base_repository"],
+        "base_sha": request["base_sha"],
+        "base_ref": request["base_ref"],
+        "simulator_repository": simulator_repository,
+        "simulator_sha": simulator_sha,
+    }
+    for key, value in expected.items():
+        actual = runtime.get(key)
+        if isinstance(actual, str) and isinstance(value, str):
+            if actual.lower() != value.lower() if key.endswith("repository") else actual != value:
+                raise ValueError(f"Trusted runtime provenance mismatch: {key}")
+        elif actual != value:
+            raise ValueError(f"Trusted runtime provenance mismatch: {key}")
+    files = runtime.get("files")
+    if not isinstance(files, dict) or set(files) != {"micropython.js"}:
+        raise ValueError("Trusted runtime provenance has an unexpected file list")
+    js = runtime_path.read_bytes()
+    record = files["micropython.js"]
+    digest = sha256(js).hexdigest()
+    if (not isinstance(record, dict) or record.get("bytes") != len(js) or
+            record.get("sha256") != digest):
+        raise ValueError("Trusted JavaScript runtime hash mismatch")
+    return {
+        "source": {
+            "repository": request["base_repository"],
+            "commit": request["base_sha"],
+            "ref": request["base_ref"],
+        },
+        "simulator": {"repository": simulator_repository, "commit": simulator_sha},
+        "artifact": {"bytes": len(js), "sha256": digest},
+    }
+
+
 def _validate_live_pr(request: dict, token: str, pull_fetcher) -> bool:
     pr = pull_fetcher(request["base_repository"], request["pr_number"], token)
     if int(pr.get("number", -1)) != request["pr_number"]:
         return False
     base = pr.get("base") or {}
     if (base.get("repo") or {}).get("full_name", "").lower() != request["base_repository"].lower():
+        return False
+    if request["action"] == "build" and (
+            base.get("sha") != request["base_sha"] or base.get("ref") != request["base_ref"]):
         return False
     head = pr.get("head") or {}
     if head.get("sha") != request["head_sha"]:
@@ -353,7 +417,7 @@ def _valid_firmware_url(value: str, repository: str, run_id: int) -> str:
 
 
 def publish(request: dict, pages: Path, browser_archive: Path, firmware_dir: Path,
-            trusted_web: Path, result: str, simulator_repository: str,
+            trusted_runtime_dir: Path, trusted_web: Path, result: str, simulator_repository: str,
             simulator_sha: str, run_id: int, run_attempt: int, firmware_url: str,
             github_token: str, pull_fetcher=fetch_pull) -> dict:
     if result not in ("success", "failure", "cancelled", "deleted"):
@@ -381,11 +445,15 @@ def publish(request: dict, pages: Path, browser_archive: Path, firmware_dir: Pat
         try:
             _valid_firmware_url(firmware_url, os.environ["GITHUB_REPOSITORY"], run_id)
             _validate_firmware(firmware_dir, request, simulator_repository, simulator_sha)
+            runtime_provenance = _validate_trusted_runtime(
+                trusted_runtime_dir, request, simulator_repository, simulator_sha
+            )
             with TemporaryDirectory(prefix="preview-archive-") as temp:
                 extracted = Path(temp) / "unpacked"
                 extracted.mkdir()
                 _safe_extract_browser(browser_archive, extracted, request,
                                      simulator_repository, simulator_sha)
+                replace_glue(extracted, trusted_runtime_dir / "micropython.js", runtime_provenance)
                 preview = pages / "pr" / str(request["pr_number"])
                 _remove_tree(pages, preview)
                 _ensure_safe_parent(pages, preview.parent)
@@ -435,6 +503,8 @@ def main() -> None:
         "request_id": os.environ["REQUEST_ID"],
         "action": os.environ["ACTION"],
         "base_repository": os.environ["BASE_REPOSITORY"],
+        "base_sha": os.environ["BASE_SHA"],
+        "base_ref": os.environ["BASE_REF"],
         "pr_number": int(os.environ["PR_NUMBER"]),
         "head_repository": os.environ.get("HEAD_REPOSITORY", ""),
         "head_sha": os.environ["HEAD_SHA"],
@@ -446,6 +516,7 @@ def main() -> None:
         pages=Path(os.environ["PAGES_DIR"]),
         browser_archive=Path(os.environ.get("BROWSER_ARCHIVE", "")),
         firmware_dir=Path(os.environ.get("FIRMWARE_DIR", "")),
+        trusted_runtime_dir=Path(os.environ.get("TRUSTED_RUNTIME_DIR", "")),
         trusted_web=Path(os.environ["TRUSTED_WEB_DIR"]),
         result=os.environ["BUILD_RESULT"],
         simulator_repository=os.environ["SIMULATOR_REPOSITORY"],

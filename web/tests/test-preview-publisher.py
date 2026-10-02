@@ -20,8 +20,9 @@ SERVICE = "alice/specter-diy-web-simulator"
 SOURCE = "bob/specter-diy"
 SHA = "a" * 40
 SIM_SHA = "b" * 40
+BASE_SHA = "d" * 40
 UPDATED = "2026-09-30T12:00:00.000000Z"
-ARTIFACTS = ("micropython.js", "micropython.wasm", "micropython.data")
+ARTIFACTS = ("micropython.wasm", "micropython.data")
 
 
 def request(sha=SHA, updated=UPDATED, action="build", run_id=101):
@@ -29,6 +30,8 @@ def request(sha=SHA, updated=UPDATED, action="build", run_id=101):
         "request_id": f"specter-pr-19-{sha}-{run_id}-1",
         "action": action,
         "base_repository": BASE,
+        "base_sha": BASE_SHA,
+        "base_ref": "main",
         "pr_number": 19,
         "head_repository": SOURCE,
         "head_sha": sha,
@@ -42,7 +45,8 @@ def live_pr(req, state="open"):
         "number": req["pr_number"],
         "state": state,
         "updated_at": req["source_updated_at"],
-        "base": {"repo": {"full_name": req["base_repository"]}, "ref": "main"},
+        "base": {"repo": {"full_name": req["base_repository"]},
+                 "sha": req["base_sha"], "ref": req["base_ref"]},
         "head": {
             "sha": req["head_sha"],
             "ref": req["head_ref"],
@@ -74,6 +78,8 @@ def browser_archive(path: Path, req: dict, tamper=None) -> None:
         "schema": 1,
         "kind": "browser-preview",
         "base_repository": req["base_repository"],
+        "base_sha": req["base_sha"],
+        "base_ref": req["base_ref"],
         "source_repository": req["head_repository"],
         "source_sha": req["head_sha"],
         "pr_number": req["pr_number"],
@@ -103,6 +109,8 @@ def browser_archive(path: Path, req: dict, tamper=None) -> None:
         record.update(bytes=len(entries[prefix + "build-info.json"]),
                       sha256=sha256(entries[prefix + "build-info.json"]).hexdigest())
         entries["manifest.json"] = json.dumps(manifest).encode()
+    elif tamper == "untrusted-js":
+        entries[prefix + "micropython.js"] = b"PR controlled JavaScript"
 
     with tarfile.open(path, "w:gz") as archive:
         for name, payload in entries.items():
@@ -141,6 +149,27 @@ def firmware_artifact(path: Path, req: dict, tamper=None) -> None:
         (path / "evil.sh").write_text("not executable")
 
 
+def trusted_runtime_artifact(path: Path, req: dict, tamper=None) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    js = b"trusted-runtime-js"
+    (path / "micropython.js").write_bytes(js)
+    runtime = {
+        "schema": 1,
+        "kind": "trusted-browser-runtime",
+        "base_repository": req["base_repository"],
+        "base_sha": req["base_sha"],
+        "base_ref": req["base_ref"],
+        "simulator_repository": SERVICE,
+        "simulator_sha": SIM_SHA,
+        "files": {"micropython.js": {"bytes": len(js), "sha256": sha256(js).hexdigest()}},
+    }
+    if tamper == "wrong-base":
+        runtime["base_sha"] = "e" * 40
+    elif tamper == "fake-hash":
+        runtime["files"]["micropython.js"]["sha256"] = "0" * 64
+    (path / "runtime.json").write_text(json.dumps(runtime), encoding="utf-8")
+
+
 class PreviewPublisherTests(unittest.TestCase):
     def setUp(self):
         self.temp = TemporaryDirectory()
@@ -150,6 +179,7 @@ class PreviewPublisherTests(unittest.TestCase):
         self.pages.mkdir()
         self.archive = self.root / "browser-preview-payload.tar.gz"
         self.firmware = self.root / "firmware"
+        self.runtime = self.root / "trusted-runtime"
         self.trusted = self.root / "trusted-web"
         (self.trusted / "browser").mkdir(parents=True)
         (self.trusted / "assets").mkdir()
@@ -165,13 +195,15 @@ class PreviewPublisherTests(unittest.TestCase):
         self.env = patch.dict("os.environ", {"GITHUB_REPOSITORY": SERVICE})
         self.env.start()
         self.addCleanup(self.env.stop)
+        trusted_runtime_artifact(self.runtime, request())
 
     def apply(self, req, result="success", build_tamper=None, firmware_tamper=None,
-              run_id=101, live_state="open"):
+              run_id=101, live_state="open", runtime_tamper=None):
         browser_archive(self.archive, req, build_tamper)
         firmware_artifact(self.firmware, req, firmware_tamper)
+        trusted_runtime_artifact(self.runtime, req, runtime_tamper)
         return publisher.publish(
-            req, self.pages, self.archive, self.firmware, self.trusted, result,
+            req, self.pages, self.archive, self.firmware, self.runtime, self.trusted, result,
             SERVICE, SIM_SHA, run_id, 1,
             f"https://github.com/{SERVICE}/actions/runs/{run_id}/artifacts/123",
             "token", lambda *_: live_pr(req, live_state),
@@ -195,9 +227,33 @@ class PreviewPublisherTests(unittest.TestCase):
         self.assertEqual(status["preview_url"], "https://alice.github.io/specter-diy-web-simulator/pr/19/")
         self.assertIn("artifacts/123", status["firmware_url"])
 
+    def test_pr_generated_javascript_is_replaced_by_trusted_runtime(self):
+        req = request()
+        result = self.apply(req)
+        self.assertEqual(result["status"], "success")
+        build = self.pages / f"pr/19/builds/{SOURCE}/{SHA}"
+        js = (build / "micropython.js").read_bytes()
+        self.assertEqual(js, b"trusted-runtime-js")
+        info = json.loads((build / "build-info.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(info["artifacts"]), {"micropython.js", "micropython.wasm", "micropython.data"})
+        self.assertEqual(info["artifacts"]["micropython.js"], {
+            "bytes": len(js), "sha256": sha256(js).hexdigest(),
+        })
+        self.assertEqual(info["trusted_runtime"]["source"]["commit"], BASE_SHA)
+
+    def test_trusted_runtime_provenance_and_hash_must_match(self):
+        for tamper in ("wrong-base", "fake-hash"):
+            with self.subTest(tamper=tamper):
+                shutil.rmtree(self.pages / ".preview-state", ignore_errors=True)
+                shutil.rmtree(self.pages / "status", ignore_errors=True)
+                result = self.apply(request(), runtime_tamper=tamper)
+                self.assertEqual(result["status"], "failure")
+                self.assertFalse((self.pages / "pr/19").exists())
+
     def test_malicious_browser_archive_paths_symlinks_and_executables_fail_closed(self):
         req = request()
-        malicious = ["traversal", "absolute", "unexpected", "symlink", "nested-symlink", "executable"]
+        malicious = ["traversal", "absolute", "unexpected", "untrusted-js",
+                     "symlink", "nested-symlink", "executable"]
         for kind in malicious:
             with self.subTest(kind=kind):
                 shutil.rmtree(self.pages / ".preview-state", ignore_errors=True)
@@ -208,7 +264,7 @@ class PreviewPublisherTests(unittest.TestCase):
                 (self.pages / "pr/19/old.html").write_text("stale")
                 self.apply_malicious_archive(req, kind)
                 result = publisher.publish(
-                    req, self.pages, self.archive, self.firmware, self.trusted, "success",
+                    req, self.pages, self.archive, self.firmware, self.runtime, self.trusted, "success",
                     SERVICE, SIM_SHA, 101, 1,
                     f"https://github.com/{SERVICE}/actions/runs/101/artifacts/123",
                     "token", lambda *_: live_pr(req),
@@ -217,7 +273,7 @@ class PreviewPublisherTests(unittest.TestCase):
                 self.assertFalse((self.pages / "pr/19").exists())
 
     def apply_malicious_archive(self, req, kind):
-        browser_archive(self.archive, req)
+        browser_archive(self.archive, req, "untrusted-js" if kind == "untrusted-js" else None)
         firmware_artifact(self.firmware, req)
         valid = {}
         with tarfile.open(self.archive, "r:gz") as archive:
@@ -263,7 +319,7 @@ class PreviewPublisherTests(unittest.TestCase):
                     browser_archive(self.archive, req, kind)
                     firmware_artifact(self.firmware, req)
                 result = publisher.publish(
-                    req, self.pages, self.archive, self.firmware, self.trusted, "success",
+                    req, self.pages, self.archive, self.firmware, self.runtime, self.trusted, "success",
                     SERVICE, SIM_SHA, 101 + index, 1,
                     f"https://github.com/{SERVICE}/actions/runs/{101 + index}/artifacts/123",
                     "token", lambda *_: live_pr(req),
@@ -279,7 +335,7 @@ class PreviewPublisherTests(unittest.TestCase):
                 browser_archive(self.archive, req)
                 firmware_artifact(self.firmware, req, kind)
                 result = publisher.publish(
-                    req, self.pages, self.archive, self.firmware, self.trusted, "success",
+                    req, self.pages, self.archive, self.firmware, self.runtime, self.trusted, "success",
                     SERVICE, SIM_SHA, 101 + index, 1,
                     f"https://github.com/{SERVICE}/actions/runs/{101 + index}/artifacts/123",
                     "token", lambda *_: live_pr(req),
@@ -292,7 +348,7 @@ class PreviewPublisherTests(unittest.TestCase):
         (self.pages / "pr/19/index.html").write_text("old successful preview")
         newer = request(sha="c" * 40, updated="2026-10-01T12:00:00.000000Z", run_id=102)
         result = publisher.publish(
-            newer, self.pages, self.archive, self.firmware, self.trusted, "failure",
+            newer, self.pages, self.archive, self.firmware, self.runtime, self.trusted, "failure",
             SERVICE, SIM_SHA, 202, 1, "", "token", lambda *_: live_pr(newer),
         )
         self.assertEqual(result["status"], "failure")
@@ -303,7 +359,7 @@ class PreviewPublisherTests(unittest.TestCase):
         newest = request(sha="c" * 40, updated="2026-10-01T12:00:00.000000Z", run_id=102)
         browser_archive(self.archive, newest)
         firmware_artifact(self.firmware, newest)
-        publisher.publish(newest, self.pages, self.archive, self.firmware, self.trusted,
+        publisher.publish(newest, self.pages, self.archive, self.firmware, self.runtime, self.trusted,
                           "success", SERVICE, SIM_SHA, 202, 1,
                           f"https://github.com/{SERVICE}/actions/runs/202/artifacts/123",
                           "token", lambda *_: live_pr(newest))
@@ -319,7 +375,7 @@ class PreviewPublisherTests(unittest.TestCase):
         closed = request(sha="c" * 40, updated="2026-10-02T12:00:00.000000Z",
                          action="delete", run_id=103)
         deleted = publisher.publish(closed, self.pages, self.archive, self.firmware,
-                                    self.trusted, "deleted", SERVICE, SIM_SHA,
+                                    self.runtime, self.trusted, "deleted", SERVICE, SIM_SHA,
                                     203, 1, "", "token", lambda *_: live_pr(closed, "closed"))
         self.assertEqual(deleted["status"], "deleted")
         self.assertFalse((self.pages / "pr/19").exists())
@@ -335,20 +391,20 @@ class PreviewPublisherTests(unittest.TestCase):
         first = request(run_id=100)
         browser_archive(self.archive, first)
         firmware_artifact(self.firmware, first)
-        publisher.publish(first, self.pages, self.archive, self.firmware, self.trusted,
+        publisher.publish(first, self.pages, self.archive, self.firmware, self.runtime, self.trusted,
                           "success", SERVICE, SIM_SHA, 301, 1,
                           f"https://github.com/{SERVICE}/actions/runs/301/artifacts/123",
                           "token", lambda *_: live_pr(first))
         second = request(run_id=101)
         browser_archive(self.archive, second)
         firmware_artifact(self.firmware, second)
-        result = publisher.publish(second, self.pages, self.archive, self.firmware, self.trusted,
+        result = publisher.publish(second, self.pages, self.archive, self.firmware, self.runtime, self.trusted,
                                    "success", SERVICE, SIM_SHA, 302, 1,
                                    f"https://github.com/{SERVICE}/actions/runs/302/artifacts/123",
                                    "token", lambda *_: live_pr(second))
         self.assertEqual(result["status"], "success")
         self.assertTrue(preserved.is_dir())
-        stale = publisher.publish(first, self.pages, self.archive, self.firmware, self.trusted,
+        stale = publisher.publish(first, self.pages, self.archive, self.firmware, self.runtime, self.trusted,
                                   "success", SERVICE, SIM_SHA, 301, 1,
                                   f"https://github.com/{SERVICE}/actions/runs/301/artifacts/123",
                                   "token", lambda *_: live_pr(first))
@@ -364,7 +420,7 @@ class PreviewPublisherTests(unittest.TestCase):
         except OSError:
             self.skipTest("Creating symlinks requires privileges on this Windows host")
         result = publisher.publish(
-            req, self.pages, self.archive, self.firmware, self.trusted, "success",
+            req, self.pages, self.archive, self.firmware, self.runtime, self.trusted, "success",
             SERVICE, SIM_SHA, 101, 1,
             f"https://github.com/{SERVICE}/actions/runs/101/artifacts/123",
             "token", lambda *_: live_pr(req),

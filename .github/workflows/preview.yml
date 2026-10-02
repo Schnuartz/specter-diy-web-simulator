@@ -19,6 +19,14 @@ on:
         description: Paired base repository (owner/specter-diy)
         type: string
         required: true
+      base_sha:
+        description: Exact PR base commit used for the trusted JavaScript runtime
+        type: string
+        required: true
+      base_ref:
+        description: PR base branch name
+        type: string
+        required: true
       pr_number:
         description: Pull request number
         type: string
@@ -55,6 +63,8 @@ jobs:
       request_id: ${{ steps.validate.outputs.request_id }}
       action: ${{ steps.validate.outputs.action }}
       base_repository: ${{ steps.validate.outputs.base_repository }}
+      base_sha: ${{ steps.validate.outputs.base_sha }}
+      base_ref: ${{ steps.validate.outputs.base_ref }}
       pr_number: ${{ steps.validate.outputs.pr_number }}
       head_repository: ${{ steps.validate.outputs.head_repository }}
       head_sha: ${{ steps.validate.outputs.head_sha }}
@@ -89,6 +99,8 @@ jobs:
       firmware_url: ${{ steps.firmware.outputs.artifact-url }}
     env:
       BASE_REPOSITORY: ${{ needs.validate.outputs.base_repository }}
+      BASE_SHA: ${{ needs.validate.outputs.base_sha }}
+      BASE_REF: ${{ needs.validate.outputs.base_ref }}
       HEAD_REPOSITORY: ${{ needs.validate.outputs.head_repository }}
       HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
       PR_NUMBER: ${{ needs.validate.outputs.pr_number }}
@@ -235,9 +247,91 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  trusted_runtime:
+    name: Build trusted JavaScript runtime from the PR base
+    needs: validate
+    if: needs.validate.outputs.action == 'build'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    concurrency:
+      group: preview-runtime-${{ github.repository }}-${{ needs.validate.outputs.pr_number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+    env:
+      BASE_REPOSITORY: ${{ needs.validate.outputs.base_repository }}
+      BASE_SHA: ${{ needs.validate.outputs.base_sha }}
+      BASE_REF: ${{ needs.validate.outputs.base_ref }}
+      SIMULATOR_REPOSITORY: ${{ github.repository }}
+      SIMULATOR_SHA: ${{ github.sha }}
+      SPECTER_SRC: ${{ github.workspace }}/specter-diy
+      SIMULATOR_WEB_DIR: ${{ github.workspace }}/simulator/web
+      TRUSTED_RUNTIME_DIR: ${{ github.workspace }}/trusted-runtime-artifact
+    steps:
+      - name: Check out pinned trusted Web Simulator tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 pinned commit
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: simulator
+          persist-credentials: false
+      - name: Check out exact validated PR base source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 pinned commit
+        with:
+          repository: ${{ needs.validate.outputs.base_repository }}
+          ref: ${{ needs.validate.outputs.base_sha }}
+          path: specter-diy
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - name: Set up Node.js for Emscripten
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Install trusted browser build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libffi-dev \
+            libgmp-dev \
+            libreadline-dev \
+            libsdl2-dev \
+            pkg-config \
+            python3
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r specter-diy/requirements.txt -r specter-diy/test/integration/requirements.txt
+      - name: Install pinned Emscripten 3.1.74
+        run: |
+          mkdir -p simulator/.browser-work
+          git init simulator/.browser-work/emsdk
+          git -C simulator/.browser-work/emsdk remote add origin https://github.com/emscripten-core/emsdk.git
+          git -C simulator/.browser-work/emsdk fetch --depth 1 origin refs/tags/3.1.74
+          git -C simulator/.browser-work/emsdk checkout --detach FETCH_HEAD
+          test "$(git -C simulator/.browser-work/emsdk rev-parse HEAD)" = "$(cat simulator/.preview-config/emsdk-commit)"
+          simulator/.browser-work/emsdk/emsdk install 3.1.74
+          simulator/.browser-work/emsdk/emsdk activate 3.1.74
+      - name: Build trusted JavaScript from the exact validated base SHA
+        env:
+          SPECTER_SOURCE_REPOSITORY: ${{ needs.validate.outputs.base_repository }}
+        run: bash simulator/web/browser/build-browser.sh
+      - name: Package the trusted JavaScript runtime with provenance
+        run: python3 simulator/web/tools/package_trusted_runtime.py
+      - name: Upload trusted JavaScript runtime
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trusted-micropython-runtime
+          path: trusted-runtime-artifact/
+          if-no-files-found: error
+          retention-days: 30
+
   finalize:
     name: Publish current preview state and result
-    needs: [validate, build]
+    needs: [validate, build, trusted_runtime]
     if: ${{ always() && needs.validate.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -258,6 +352,8 @@ jobs:
       REQUEST_ID: ${{ needs.validate.outputs.request_id }}
       ACTION: ${{ needs.validate.outputs.action }}
       BASE_REPOSITORY: ${{ needs.validate.outputs.base_repository }}
+      BASE_SHA: ${{ needs.validate.outputs.base_sha }}
+      BASE_REF: ${{ needs.validate.outputs.base_ref }}
       PR_NUMBER: ${{ needs.validate.outputs.pr_number }}
       HEAD_REPOSITORY: ${{ needs.validate.outputs.head_repository }}
       HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
@@ -269,7 +365,8 @@ jobs:
       TRUSTED_WEB_DIR: ${{ github.workspace }}/simulator/web
       BROWSER_ARCHIVE: ${{ github.workspace }}/browser-artifact/browser-preview-payload.tar.gz
       FIRMWARE_DIR: ${{ github.workspace }}/firmware-artifact
-      BUILD_RESULT: ${{ inputs.action == 'delete' && 'deleted' || needs.build.result == 'success' && 'success' || needs.build.result == 'cancelled' && 'cancelled' || 'failure' }}
+      TRUSTED_RUNTIME_DIR: ${{ github.workspace }}/trusted-runtime-artifact
+      BUILD_RESULT: ${{ inputs.action == 'delete' && 'deleted' || (needs.build.result == 'success' && needs.trusted_runtime.result == 'success') && 'success' || (needs.build.result == 'cancelled' || needs.trusted_runtime.result == 'cancelled') && 'cancelled' || 'failure' }}
       FIRMWARE_URL: ${{ needs.build.outputs.firmware_url }}
     steps:
       - name: Check out trusted publisher implementation
@@ -298,6 +395,13 @@ jobs:
         with:
           name: specter-firmware
           path: firmware-artifact
+      - name: Download trusted JavaScript runtime
+        if: needs.build.result == 'success' && needs.trusted_runtime.result == 'success' && needs.validate.outputs.action == 'build'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: trusted-micropython-runtime
+          path: trusted-runtime-artifact
       - name: Prepare persistent Pages branch
         run: |
           gh auth setup-git
@@ -341,4 +445,5 @@ jobs:
           printf 'Request: `%s`\n' "$REQUEST_ID" >> "$GITHUB_STEP_SUMMARY"
           printf 'Action: `%s`\n' "$ACTION" >> "$GITHUB_STEP_SUMMARY"
           printf 'Build job: `%s`\n' '${{ needs.build.result }}' >> "$GITHUB_STEP_SUMMARY"
+          printf 'Trusted runtime job: `%s`\n' '${{ needs.trusted_runtime.result }}' >> "$GITHUB_STEP_SUMMARY"
           printf 'Status JSON: `status/pr/%s.json`\n' "$PR_NUMBER" >> "$GITHUB_STEP_SUMMARY"

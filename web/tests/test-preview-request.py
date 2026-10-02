@@ -13,6 +13,8 @@ BASE = "cryptoadvance/specter-diy"
 SERVICE = "cryptoadvance/specter-diy-web-simulator"
 HEAD = "bob/specter-diy"
 SHA = "a" * 40
+BASE_SHA = "d" * 40
+BASE_REF = "master"
 UPDATED = "2026-09-30T12:00:00Z"
 
 
@@ -21,6 +23,8 @@ def payload(action="build"):
         "request_id": f"specter-pr-19-{SHA}-101-1",
         "action": action,
         "base_repository": BASE,
+        "base_sha": BASE_SHA,
+        "base_ref": BASE_REF,
         "pr_number": "19",
         "head_repository": HEAD,
         "head_sha": SHA,
@@ -29,7 +33,8 @@ def payload(action="build"):
     }
 
 
-def pull(state="open", repository=HEAD, sha=SHA, updated=UPDATED, number=19, base=BASE):
+def pull(state="open", repository=HEAD, sha=SHA, updated=UPDATED, number=19,
+         base=BASE, base_sha=BASE_SHA, base_ref=BASE_REF):
     return {
         "number": number,
         "state": state,
@@ -39,7 +44,7 @@ def pull(state="open", repository=HEAD, sha=SHA, updated=UPDATED, number=19, bas
             "ref": "feature/browser-preview",
             "repo": {"full_name": repository} if repository else None,
         },
-        "base": {"repo": {"full_name": base}, "ref": "master"},
+        "base": {"repo": {"full_name": base}, "sha": base_sha, "ref": base_ref},
     }
 
 
@@ -65,6 +70,8 @@ class PreviewRequestTests(unittest.TestCase):
         self.assertEqual(result["base_repository"], BASE)
         self.assertEqual(result["head_repository"], HEAD)
         self.assertEqual(result["head_sha"], SHA)
+        self.assertEqual(result["base_sha"], BASE_SHA)
+        self.assertEqual(result["base_ref"], BASE_REF)
         self.assertEqual(result["pr_number"], 19)
 
     def test_service_owner_determines_base_repository(self):
@@ -80,6 +87,8 @@ class PreviewRequestTests(unittest.TestCase):
     def test_build_rejects_wrong_live_base_head_sha_repo_ref_or_closed_pr(self):
         cases = [
             (pull(base="evil/specter-diy"), "another base repository"),
+            (pull(base_sha="c" * 40), "base SHA no longer matches"),
+            (pull(base_ref="release"), "base ref no longer matches"),
             (pull(sha="c" * 40), "head SHA"),
             (pull(repository="mallory/specter-diy"), "head repository"),
             (pull(state="closed"), "open PR"),

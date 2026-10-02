@@ -11,9 +11,9 @@ specter-diy PR event
                                                                   ▼
                                               specter-diy-web-simulator
                                                 ├─ validate live PR
-                                                ├─ build firmware + browser
-                                                ├─ run firmware/browser/USB tests
-                                                ├─ validate artifacts as data
+                                                ├─ untrusted runner: firmware + WASM/data + tests
+                                                ├─ fresh trusted runner: JS from exact base SHA
+                                                ├─ finalizer: validate and combine artifacts
                                                 ├─ update Pages preview + state
                                                 └─ publish status/pr/<N>.json
                                                                   │
@@ -149,8 +149,9 @@ start automatically after the dispatcher verifies the current PR and exact
 head SHA. Closing a PR always dispatches cleanup. The workflow reads only
 trusted event metadata and a script checked out from the protected default
 branch; it does not check out or execute PR code. It dispatches a unique request
-ID, base and head repositories, PR number, exact head SHA/ref, action, and
-source `updated_at`. Closing a PR sends `action=delete`.
+ID, base repository and exact base SHA/ref, head repository, PR number, exact
+head SHA/ref, action, and source `updated_at`. Closing a PR sends
+`action=delete`.
 
 The dispatcher polls for up to 210 minutes. This covers the paired service's
 5-minute validation, 180-minute build, and 10-minute finalizer, with a short
@@ -188,15 +189,19 @@ executable preview and publishes a failure status instead of leaving an older
 commit looking current. Every accepted request publishes
 `status/pr/<N>.json` through GitHub Pages.
 
-The workflow builds firmware and WebAssembly from the same exact Specter SHA.
-Firmware `.bin` and `.hex` files are uploaded as a Web Simulator Actions
-artifact with source, PR, request, and simulator provenance. The browser
-payload carries the same metadata and SHA256 hashes. The trusted finalizer
-checks exact file allowlists, paths, file types, hashes, manifests, and
-provenance; safe extraction rejects traversal, absolute paths, symlinks,
-executables, malformed archives, and unexpected files. Artifact contents are
-never executed during publication. The published WebAssembly and JavaScript
-are intentionally loaded by the visitor's browser as the preview.
+The untrusted job builds firmware and WebAssembly from the exact PR head SHA.
+Its browser archive contains only `micropython.wasm` and `micropython.data`;
+the PR-generated `micropython.js` is checked locally during that job but is
+never included in the artifact. A separate fresh runner checks out the exact
+live PR base SHA and trusted Web Simulator tooling, builds the browser runtime,
+and uploads only `micropython.js` with its provenance. The trusted finalizer
+checks both artifacts, binds them to the live base/head SHAs, then combines the
+trusted JavaScript with the validated PR WebAssembly/data. It checks exact file
+allowlists, paths, file types, hashes, manifests, and provenance; safe
+extraction rejects traversal, absolute paths, symlinks, executables, malformed
+archives, and unexpected files. Artifact contents are never executed during
+publication. The final JavaScript and WebAssembly are loaded by the visitor's
+browser as the preview.
 
 ## Security boundary and trade-off
 
@@ -206,13 +211,15 @@ Python, submodules, tests, generated files, and build artifacts. It has only
 and no `id-token: write`. PR-controlled code cannot read the dispatch token or
 the Specter PR-comment token.
 
-The finalizer runs trusted Web Simulator workflow code. It alone receives
+The trusted runtime job uses a separate fresh runner, has only `contents: read`,
+and never checks out the PR head. It builds JavaScript from the validated base
+commit and trusted Web Simulator code. The finalizer alone receives
 `contents: write`, `pages: write`, and `id-token: write`, plus read access to
-the workflow artifacts and PR metadata. It parses untrusted build artifacts
-as files and publishes only the strict browser data allowlist with the
-default-branch shell. It does not run scripts, Python, or JavaScript from an
-artifact. The `gh-pages` branch is the persistent complete tree; GitHub Pages
-deploys it from a Pages artifact created by the trusted finalizer.
+the workflow artifacts and PR metadata. It parses both artifacts as files and
+publishes only the allowlisted WASM/data and trusted runtime JavaScript with
+the default-branch shell. It does not run scripts, Python, or JavaScript from
+an artifact. The `gh-pages` branch is the persistent complete tree; GitHub
+Pages deploys it from a Pages artifact created by the trusted finalizer.
 
 This makes the Web Simulator default branch a stronger trust root: a malicious
 change merged there could publish deceptive previews, serve malicious browser
