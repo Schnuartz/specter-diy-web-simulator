@@ -144,14 +144,13 @@ for the basic setup.
 ## Request validation and lifecycle
 
 Specter DIY's `pull_request_target` workflow handles PR open, synchronize,
-reopen, ready-for-review, approval-label, and close events. Same-repository PRs
-start automatically. A fork PR needs a maintainer to add the `preview-approved`
-label; adding that label starts the preview. Closing a PR always dispatches
-cleanup, regardless of labels. The workflow reads only trusted event metadata
-and a script checked out from the protected default branch; it does not check
-out or execute PR code. It dispatches a unique request ID, base and head
-repositories, PR number, exact head SHA/ref, action, and source `updated_at`.
-Closing a PR sends `action=delete`.
+reopen, ready-for-review, and close events. Same-repository and fork PRs both
+start automatically after the dispatcher verifies the current PR and exact
+head SHA. Closing a PR always dispatches cleanup. The workflow reads only
+trusted event metadata and a script checked out from the protected default
+branch; it does not check out or execute PR code. It dispatches a unique request
+ID, base and head repositories, PR number, exact head SHA/ref, action, and
+source `updated_at`. Closing a PR sends `action=delete`.
 
 The dispatcher polls for up to 210 minutes. This covers the paired service's
 5-minute validation, 180-minute build, and 10-minute finalizer, with a short
