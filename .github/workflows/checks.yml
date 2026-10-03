@@ -29,3 +29,15 @@ jobs:
           python3 web/tests/test-resolve-build-target.py
           python3 web/tests/test-trigger-pr.py
           node web/tests/test-demo-data.mjs
+      - name: Install Chromium for browser UI tests
+        run: npx --prefix web playwright install --with-deps chromium
+      - name: Test Developer Options inspector UI
+        run: |
+          python3 -m http.server 8765 --directory web >/tmp/specter-inspector-test-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8765/ >/dev/null; then break; fi
+            sleep 1
+          done
+          CI=true TEST_BASE_URL=http://127.0.0.1:8765/ node web/tests/test-inspector.mjs
