@@ -140,6 +140,15 @@ uses `GITHUB_REPOSITORY` and works in another fork after its owner enables
 Actions and Pages. PR previews are untrusted development code; the warning
 is permanent and no wallet secrets should ever be entered.
 
+The optional **Developer Options** panel inspects browser simulator state, flash
+and peripheral files, and the WebAssembly memory buffer. Firmware metrics report
+known keystore objects without showing their contents. Reading
+`keystore.mnemonic` requires an explicit action; closing the sensitive-values
+panel or disabling Developer Options clears the displayed value and its temporary
+worker-side copy. This is a debugging view into the browser build, not hardware
+RAM, and it must only be used with public test phrases. The inspector browser test
+uses a fake phrase and a mocked worker response.
+
 GitHub Pages does not provide COOP/COEP response headers. This build does not
 require SharedArrayBuffer. The DIY display has a Canvas pixel bridge for
 browsers without transferable OffscreenCanvas. Chromium is covered by CI;

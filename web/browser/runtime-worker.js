@@ -6,7 +6,69 @@ let scannerActive = false;
 let program = 'wallet';
 self.screen = { width: 480, height: 800 };
 const send = (type, details = {}) => postMessage({ type, ...details });
-const workerRevision = '2026-09-15.2';
+const workerRevision = '2026-10-03.developer-inspector1';
+let inspectorEnabled = false;
+// Runs on the firmware's asyncio loop so inspection never re-enters the WASM VM.
+const inspectorPython = `import os, gc, json, asyncio
+def exists(path):
+    try:
+        os.stat(path)
+        return True
+    except OSError:
+        return False
+def install(main):
+    original = main.Specter.setup
+    started = [False]
+    async def report(device):
+        while True:
+            try:
+                if exists('/bridge/inspector-disabled'):
+                    if exists('/bridge/inspector-state.json'):
+                        os.remove('/bridge/inspector-state.json')
+                    await asyncio.sleep_ms(100)
+                    continue
+                with open('/bridge/inspector-request', 'r') as f:
+                    request = json.loads(f.read())
+                os.remove('/bridge/inspector-request')
+                store = device.keystore
+                screen = getattr(device.gui, 'scr', None)
+                mnemonic = getattr(store, 'mnemonic', None)
+                mnemonic_text = mnemonic if isinstance(mnemonic, str) else None
+                root = getattr(store, 'root', None)
+                enc_secret = getattr(store, 'enc_secret', None)
+                data = {'requestId': int(request.get('requestId')), 'allocatedBytes': gc.mem_alloc(), 'freeBytes': gc.mem_free(),
+                    'network': device.network, 'menu': getattr(device.current_menu, '__name__', 'unknown'),
+                    'screen': type(screen).__name__ if screen is not None else 'unavailable',
+                    'keystore': type(store).__name__ if store is not None else None,
+                    'keystoreObjects': {
+                        'keystore.mnemonic': {'present': mnemonic_text is not None,
+                            'wordCount': len(mnemonic_text.split()) if mnemonic_text is not None else 0,
+                            'utf8Bytes': len(mnemonic_text.encode()) if mnemonic_text is not None else 0},
+                        'keystore.root': {'present': root is not None,
+                            'type': type(root).__name__ if root is not None else None},
+                        'keystore.enc_secret': {'loaded': enc_secret is not None,
+                            'bytes': len(enc_secret) if enc_secret is not None else 0},
+                        'bip39_seed': {'retainedAsKeystoreField': False,
+                            'note': 'Temporary local value during mnemonic derivation.'}},
+                    'apps': [type(app).__name__ for app in device.apps]}
+                if request.get('includeSensitive') and mnemonic_text is not None and not exists('/bridge/inspector-sensitive-cancelled'):
+                    data['sensitiveValues'] = {'keystore.mnemonic': mnemonic_text}
+                if not exists('/bridge/inspector-disabled'):
+                    with open('/bridge/inspector-state.json', 'w') as f:
+                        json.dump(data, f)
+            except OSError:
+                pass
+            except Exception as e:
+                with open('/bridge/inspector-state.json', 'w') as f:
+                    json.dump({'error': str(e)}, f)
+            await asyncio.sleep_ms(100)
+    async def setup(device):
+        if not started[0]:
+            asyncio.create_task(report(device))
+            started[0] = True
+        return await original(device)
+    main.Specter.setup = setup
+`;
 const SD_CAPACITY_BYTES = 8_000_000_000;
 const SD_ENOSPC = 51;
 let fatalReported = false;
@@ -237,10 +299,114 @@ function createCard(fs, slot) {
   fs.writeFile(`${root}/private.key`, key);
   fs.writeFile(`${root}/attempts`, new Uint8Array([10]));
 }
+function inspectFiles(fs) {
+  const files = [];
+  for (const root of program === 'mockui' ? ['/state', '/flash'] : ['/state']) {
+    for (const file of walk(fs, root)) {
+      const path = `${root}/${file.path}`;
+      // Hash every byte in bounded chunks so same-size rewrites are detectable.
+      let hash = 2166136261;
+      const stream = fs.open(path, 'r');
+      try {
+        const buffer = new Uint8Array(65536);
+        let count;
+        while ((count = fs.read(stream, buffer, 0, buffer.length)) > 0) {
+          for (let i = 0; i < count; i++) hash = Math.imul(hash ^ buffer[i], 16777619) >>> 0;
+        }
+      } finally { fs.close(stream); }
+      files.push({ path, size: file.size, hash: hash.toString(16).padStart(8, '0') });
+    }
+  }
+  return files;
+}
+function sendInspection(data, attempts = 0) {
+  try { collectInspection(data, attempts); }
+  catch (error) { send('operation-error', { operation: 'inspector-state', message: error.message || String(error) }); }
+}
+function collectInspection(data, attempts) {
+  const fs = Module.FS;
+  const statePath = '/bridge/inspector-state.json';
+  if (!inspectorEnabled) {
+    if (fs.analyzePath(statePath).exists) fs.unlink(statePath);
+    return;
+  }
+  let firmware = null;
+  if (fs.analyzePath(statePath).exists) firmware = JSON.parse(fs.readFile(statePath, { encoding: 'utf8' }));
+  if (program === 'wallet' && firmware?.requestId !== data.requestId && attempts < 40) {
+    setTimeout(() => sendInspection(data, attempts + 1), 50);
+    return;
+  }
+  const matchingFirmware = firmware?.requestId === data.requestId ? firmware : null;
+  const { sensitiveValues: capturedSensitiveValues, ...firmwareState } = matchingFirmware || {};
+  const sensitiveCancelled = data.includeSensitive && fs.analyzePath('/bridge/inspector-sensitive-cancelled').exists;
+  send('inspector-state', { requestId: data.requestId, files: data.includeFiles ? inspectFiles(fs) : null,
+    memoryBytes: Module.HEAPU8.buffer.byteLength,
+    firmware: matchingFirmware ? firmwareState : { error: 'Firmware metrics unavailable during this operation; refresh to retry.' },
+    sensitiveValues: data.includeSensitive ? sensitiveCancelled ? {} : capturedSensitiveValues || {} : undefined,
+    scannerActive, qrQueued: qrQueue.length,
+    sdInserted: fs.analyzePath('/bridge/sd-inserted').exists,
+    cardSlot: fs.analyzePath('/bridge/card-slot').exists ? fs.readFile('/bridge/card-slot')[0] : null });
+  if (data.includeSensitive) {
+    if (fs.analyzePath(statePath).exists) fs.unlink(statePath);
+    if (fs.analyzePath('/bridge/inspector-sensitive-cancelled').exists) fs.unlink('/bridge/inspector-sensitive-cancelled');
+  }
+}
 function handle(data) {
   const fs = Module.FS;
   try {
-    if (data.type === 'pointer') {
+    if (data.type === 'inspector-enable') {
+      inspectorEnabled = Boolean(data.enabled);
+      if (!inspectorEnabled) {
+        fs.writeFile('/bridge/inspector-disabled', new Uint8Array([1]));
+        for (const path of ['/bridge/inspector-request', '/bridge/inspector-state.json']) {
+          if (fs.analyzePath(path).exists) fs.unlink(path);
+        }
+      } else if (fs.analyzePath('/bridge/inspector-disabled').exists) {
+        fs.unlink('/bridge/inspector-disabled');
+      }
+    } else if (data.type.startsWith('inspector-')) {
+      if (!inspectorEnabled) throw new Error('Developer Options are disabled');
+      if (data.type === 'inspector-state') {
+        if (data.includeSensitive && fs.analyzePath('/bridge/inspector-sensitive-cancelled').exists) {
+          fs.unlink('/bridge/inspector-sensitive-cancelled');
+        }
+        fs.writeFile('/bridge/inspector-request', JSON.stringify({
+          requestId: data.requestId,
+          includeSensitive: data.includeSensitive === true,
+        }));
+        sendInspection(data);
+      } else if (data.type === 'inspector-hide-sensitive') {
+        fs.writeFile('/bridge/inspector-sensitive-cancelled', new Uint8Array([1]));
+        const requestPath = '/bridge/inspector-request';
+        if (fs.analyzePath(requestPath).exists) {
+          try {
+            const request = JSON.parse(fs.readFile(requestPath, { encoding: 'utf8' }));
+            if (request.includeSensitive) fs.unlink(requestPath);
+          } catch { fs.unlink(requestPath); }
+        }
+        const statePath = '/bridge/inspector-state.json';
+        if (fs.analyzePath(statePath).exists) {
+          try {
+            const state = JSON.parse(fs.readFile(statePath, { encoding: 'utf8' }));
+            delete state.sensitiveValues;
+            fs.writeFile(statePath, JSON.stringify(state));
+          } catch { fs.unlink(statePath); }
+        }
+      } else if (data.type === 'inspector-file') {
+        const path = data.path;
+        if (typeof path !== 'string' || !path.startsWith('/state/')) throw new Error('Invalid inspector path');
+        relativePath(path.slice(1));
+        const size = fs.stat(path).size;
+        const stream = fs.open(path, 'r');
+        const bytes = new Uint8Array(Math.min(size, 65536));
+        try { fs.read(stream, bytes, 0, bytes.length, 0); } finally { fs.close(stream); }
+        send('inspector-file', { requestId: data.requestId, path, size, bytes });
+      } else if (data.type === 'inspector-memory') {
+        const address = data.address;
+        if (!Number.isSafeInteger(address) || address < 0 || address >= Module.HEAPU8.length) throw new Error('RAM address is outside WebAssembly memory');
+        send('inspector-memory', { address, bytes: Module.HEAPU8.slice(address, address + 256) });
+      }
+    } else if (data.type === 'pointer') {
       if (Module._browser_pointer) Module._browser_pointer(data.x, data.y, data.down);
       else throw new Error('Pointer bridge unavailable');
     } else if (data.type === 'sd-insert') {
@@ -366,6 +532,20 @@ onmessage = async ({ data }) => {
         mkdirs(fs, '/state/cards');
         mkdirs(fs, '/bridge');
         installSdQuota(fs);
+        if (program === 'wallet' && !data.sdProbe && !data.qrProbe && !data.cardProbe && !data.diag) {
+          try {
+            const bootPath = '/browser/boot.py';
+            const boot = fs.readFile(bootPath, { encoding: 'utf8' });
+            if (boot.includes('import main\n') && !boot.includes('browser_inspector.install(main)')) {
+              fs.writeFile('/browser/browser_inspector.py', inspectorPython);
+              fs.writeFile(bootPath, boot.replace('import main\n', 'import main\nimport browser_inspector\nbrowser_inspector.install(main)\n'));
+            } else if (!boot.includes('browser_inspector.install(main)')) {
+              send('diagnostic', { event: 'inspector-install-skipped', message: 'Could not find the normal firmware entry point.' });
+            }
+          } catch (error) {
+            send('diagnostic', { event: 'inspector-install-skipped', message: error.message || String(error) });
+          }
+        }
         for (const file of data.stateFiles || []) {
           if (!file.path || file.path.startsWith('ramdisk/')) continue;
           const name = relativePath(file.path);
